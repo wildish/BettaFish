@@ -1,0 +1,12 @@
+services:
+  mysql:
+    container_name: mysql
+    image: bitnami/mysql:8.0.35
+    volumes:
+      - /data/mysql/data:/bitnami/mysql/data
+      - /data/BettaFish/my.cnf:/opt/bitnami/mysql/conf/my.cnf
+    environment:
+      - MYSQL_ROOT_PASSWORD=tjrmyVeoH6WxLM0YZlAT7p
+      - TZ=Asia/Shanghai
+    ports:
+      - 3306:3306
