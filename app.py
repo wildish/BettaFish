@@ -16,6 +16,7 @@ import requests
 from loguru import logger
 import importlib
 from pathlib import Path
+from MindSpider.main import MindSpider
 
 # 导入ReportEngine
 try:
@@ -47,6 +48,8 @@ LOG_DIR.mkdir(exist_ok=True)
 CONFIG_MODULE_NAME = 'config'
 CONFIG_FILE_PATH = Path(__file__).resolve().parent / 'config.py'
 CONFIG_KEYS = [
+    'HOST',
+    'PORT',
     'DB_DIALECT',
     'DB_HOST',
     'DB_PORT',
@@ -94,20 +97,10 @@ def _load_config_module():
 def read_config_values():
     """Return the current configuration values that are exposed to the frontend."""
     try:
-        # 重新导入 config 模块以获取最新的 Settings 实例
-        importlib.invalidate_caches()
-        if CONFIG_MODULE_NAME in sys.modules:
-            importlib.reload(sys.modules[CONFIG_MODULE_NAME])
-        else:
-            importlib.import_module(CONFIG_MODULE_NAME)
+        # 重新加载配置以获取最新的 Settings 实例
+        from config import reload_settings, settings
+        reload_settings()
         
-        # 从 config 模块获取 settings 实例
-        config_module = sys.modules[CONFIG_MODULE_NAME]
-        if not hasattr(config_module, 'settings'):
-            logger.error("config 模块中没有找到 settings 实例")
-            return {}
-        
-        settings = config_module.settings
         values = {}
         for key in CONFIG_KEYS:
             # 从 Pydantic Settings 实例读取值
@@ -230,6 +223,12 @@ def initialize_system_components():
     """启动所有依赖组件（Streamlit 子应用、ForumEngine、ReportEngine）。"""
     logs = []
     errors = []
+    
+    spider = MindSpider()
+    if spider.initialize_database():
+        logger.info("数据库初始化成功")
+    else:
+        logger.error("数据库初始化失败")
 
     try:
         stop_forum_engine()
@@ -1028,8 +1027,11 @@ def handle_status_request():
     })
 
 if __name__ == '__main__':
-    HOST = '0.0.0.0'
-    PORT = 5000
+    # 从配置文件读取 HOST 和 PORT
+    from config import settings
+    HOST = settings.HOST
+    PORT = settings.PORT
+    
     logger.info("等待配置确认，系统将在前端指令后启动组件...")
     logger.info(f"Flask服务器已启动，访问地址: http://{HOST}:{PORT}")
     
