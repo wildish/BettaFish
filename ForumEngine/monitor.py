@@ -120,6 +120,21 @@ class LogMonitor:
         except Exception as e:
             logger.exception(f"ForumEngine: 写入forum.log失败: {e}")
     
+    def get_log_level(self, line: str) -> Optional[str]:
+        """检测日志行的级别（INFO/ERROR/WARNING/DEBUG等）
+        
+        支持loguru格式：YYYY-MM-DD HH:mm:ss.SSS | LEVEL | ...
+        
+        Returns:
+            'INFO', 'ERROR', 'WARNING', 'DEBUG' 或 None（无法识别）
+        """
+        # 检查loguru格式：YYYY-MM-DD HH:mm:ss.SSS | LEVEL | ...
+        # 匹配模式：| LEVEL | 或 | LEVEL     |
+        match = re.search(r'\|\s*(INFO|ERROR|WARNING|DEBUG|TRACE|CRITICAL)\s*\|', line)
+        if match:
+            return match.group(1)
+        return None
+    
     def is_target_log_line(self, line: str) -> bool:
         """检查是否是目标日志行（SummaryNode）
         
@@ -134,6 +149,11 @@ class LogMonitor:
         - 包含错误关键词的日志（JSON解析失败、JSON修复失败等）
         """
         # 排除 ERROR 级别的日志
+        log_level = self.get_log_level(line)
+        if log_level == 'ERROR':
+            return False
+        
+        # 兼容旧检查方式
         if "| ERROR" in line or "| ERROR    |" in line:
             return False
         
@@ -418,6 +438,31 @@ class LogMonitor:
         
         for line in lines:
             if not line.strip():
+                continue
+            
+            # 首先检查日志级别，更新ERROR块状态
+            log_level = self.get_log_level(line)
+            if log_level == 'ERROR':
+                # 遇到ERROR，进入ERROR块状态
+                self.in_error_block[app_name] = True
+                # 如果正在捕获JSON，立即停止并清空缓冲区
+                if self.capturing_json[app_name]:
+                    self.capturing_json[app_name] = False
+                    self.json_buffer[app_name] = []
+                # 跳过当前行，不处理
+                continue
+            elif log_level == 'INFO':
+                # 遇到INFO，退出ERROR块状态
+                self.in_error_block[app_name] = False
+            # 其他级别（WARNING、DEBUG等）保持当前状态
+            
+            # 如果在ERROR块中，拒绝处理所有内容
+            if self.in_error_block[app_name]:
+                # 如果正在捕获JSON，立即停止并清空缓冲区
+                if self.capturing_json[app_name]:
+                    self.capturing_json[app_name] = False
+                    self.json_buffer[app_name] = []
+                # 跳过当前行，不处理
                 continue
                 
             # 检查是否是目标节点行和JSON开始标记
