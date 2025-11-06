@@ -513,6 +513,7 @@ def run_report_generation(task: ReportTask, query: str, custom_template: str = "
 
     except Exception as e:
         logger.exception(f"报告生成过程中发生错误: {str(e)}")
+        logger.exception(f"报告生成过程中发生错误: {str(e)}")
         task.update_status("error", 0, str(e))
         task.publish_event('error', {
             'message': str(e),
@@ -888,53 +889,6 @@ def get_result_json(task_id: str):
         }), 500
 
 
-@report_bp.route('/download/<task_id>', methods=['GET'])
-def download_report(task_id: str):
-    """
-    下载已生成的报告HTML文件。
-
-    参数:
-        task_id: 任务ID。
-
-    返回:
-        Response: HTML文件的附件下载响应。
-    """
-    try:
-        task = _get_task(task_id)
-        if not task:
-            return jsonify({
-                'success': False,
-                'error': '任务不存在'
-            }), 404
-
-        if task.status != "completed" or not task.report_file_path:
-            return jsonify({
-                'success': False,
-                'error': '报告尚未完成或尚未保存'
-            }), 400
-
-        if not os.path.exists(task.report_file_path):
-            return jsonify({
-                'success': False,
-                'error': '报告文件不存在或已被删除'
-            }), 404
-
-        download_name = task.report_file_name or os.path.basename(task.report_file_path)
-        return send_file(
-            task.report_file_path,
-            mimetype='text/html',
-            as_attachment=True,
-            download_name=download_name
-        )
-
-    except Exception as e:
-        logger.exception(f"下载报告失败: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
 @report_bp.route('/cancel/<task_id>', methods=['POST'])
 def cancel_task(task_id: str):
     """
@@ -1036,7 +990,6 @@ def get_templates():
 # 错误处理
 @report_bp.errorhandler(404)
 def not_found(error):
-    """404兜底处理：保证接口统一返回JSON结构"""
     logger.exception(f"API端点不存在: {str(error)}")
     return jsonify({
         'success': False,
@@ -1046,7 +999,6 @@ def not_found(error):
 
 @report_bp.errorhandler(500)
 def internal_error(error):
-    """500兜底处理：捕获未被主动捕获的异常"""
     logger.exception(f"服务器内部错误: {str(error)}")
     return jsonify({
         'success': False,
