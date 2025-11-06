@@ -119,7 +119,7 @@ class LogMonitor:
                     f.flush()
         except Exception as e:
             logger.exception(f"ForumEngine: 写入forum.log失败: {e}")
-   
+    
     def is_target_log_line(self, line: str) -> bool:
         """检查是否是目标日志行（SummaryNode）"""
         # 简单字符串包含检查，更可靠
@@ -399,7 +399,7 @@ class LogMonitor:
             if not line.strip():
                 continue
                 
-            # 检查是否是目标节点行或包含JSON开始标记的行
+            # 检查是否是目标节点行和JSON开始标记
             is_target = self.is_target_log_line(line)
             is_json_start = self.is_json_start_line(line)
             
