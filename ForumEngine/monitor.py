@@ -19,7 +19,6 @@ try:
     HOST_AVAILABLE = True
 except ImportError:
     logger.exception("ForumEngine: 论坛主持人模块未找到，将以纯监控模式运行")
-    logger.exception("ForumEngine: 论坛主持人模块未找到，将以纯监控模式运行")
     HOST_AVAILABLE = False
 
 class LogMonitor:
@@ -121,67 +120,11 @@ class LogMonitor:
         except Exception as e:
             logger.exception(f"ForumEngine: 写入forum.log失败: {e}")
     
-    def get_log_level(self, line: str) -> Optional[str]:
-        """检测日志行的级别（INFO/ERROR/WARNING/DEBUG等）
-        
-        支持loguru格式：YYYY-MM-DD HH:mm:ss.SSS | LEVEL | ...
-        
-        Returns:
-            'INFO', 'ERROR', 'WARNING', 'DEBUG' 或 None（无法识别）
-        """
-        # 检查loguru格式：YYYY-MM-DD HH:mm:ss.SSS | LEVEL | ...
-        # 匹配模式：| LEVEL | 或 | LEVEL     |
-        match = re.search(r'\|\s*(INFO|ERROR|WARNING|DEBUG|TRACE|CRITICAL)\s*\|', line)
-        if match:
-            return match.group(1)
-        return None
-    
-    def get_log_level(self, line: str) -> Optional[str]:
-        """检测日志行的级别（INFO/ERROR/WARNING/DEBUG等）
-        
-        支持loguru格式：YYYY-MM-DD HH:mm:ss.SSS | LEVEL | ...
-        
-        Returns:
-            'INFO', 'ERROR', 'WARNING', 'DEBUG' 或 None（无法识别）
-        """
-        # 检查loguru格式：YYYY-MM-DD HH:mm:ss.SSS | LEVEL | ...
-        # 匹配模式：| LEVEL | 或 | LEVEL     |
-        match = re.search(r'\|\s*(INFO|ERROR|WARNING|DEBUG|TRACE|CRITICAL)\s*\|', line)
-        if match:
-            return match.group(1)
-        return None
-    
     def is_target_log_line(self, line: str) -> bool:
-        """检查是否是目标日志行（SummaryNode）
-        
-        支持多种识别方式：
-        1. 类名：FirstSummaryNode, ReflectionSummaryNode
-        2. 完整模块路径：InsightEngine.nodes.summary_node、MediaEngine.nodes.summary_node、QueryEngine.nodes.summary_node
-        3. 部分模块路径：nodes.summary_node（兼容性）
-        4. 关键标识文本：正在生成首次段落总结、正在生成反思总结
-        
-        排除条件：
-        - ERROR 级别的日志（错误日志不应被识别为目标节点）
-        - 包含错误关键词的日志（JSON解析失败、JSON修复失败等）
-        """
-        # 排除 ERROR 级别的日志
-        log_level = self.get_log_level(line)
-        if log_level == 'ERROR':
-            return False
-        
-        # 兼容旧检查方式
-        if "| ERROR" in line or "| ERROR    |" in line:
-            return False
-        
-        # 排除包含错误关键词的日志
-        error_keywords = ["JSON解析失败", "JSON修复失败", "Traceback", "File \""]
-        for keyword in error_keywords:
-            if keyword in line:
-                return False
-        
-        # 检查是否包含目标节点模式
-        for pattern in self.target_node_patterns:
-            if pattern in line:
+        """检查是否是目标日志行（SummaryNode）"""
+        # 简单字符串包含检查，更可靠
+        for node_name in self.target_nodes:
+            if node_name in line:
                 return True
         return False
     
@@ -481,7 +424,7 @@ class LogMonitor:
                 # 跳过当前行，不处理
                 continue
                 
-            # 检查是否是目标节点行或包含JSON开始标记的行
+            # 检查是否是目标节点行和JSON开始标记
             is_target = self.is_target_log_line(line)
             is_json_start = self.is_json_start_line(line)
             
