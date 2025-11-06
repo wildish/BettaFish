@@ -120,21 +120,6 @@ class LogMonitor:
         except Exception as e:
             logger.exception(f"ForumEngine: 写入forum.log失败: {e}")
     
-    def get_log_level(self, line: str) -> Optional[str]:
-        """检测日志行的级别（INFO/ERROR/WARNING/DEBUG等）
-        
-        支持loguru格式：YYYY-MM-DD HH:mm:ss.SSS | LEVEL | ...
-        
-        Returns:
-            'INFO', 'ERROR', 'WARNING', 'DEBUG' 或 None（无法识别）
-        """
-        # 检查loguru格式：YYYY-MM-DD HH:mm:ss.SSS | LEVEL | ...
-        # 匹配模式：| LEVEL | 或 | LEVEL     |
-        match = re.search(r'\|\s*(INFO|ERROR|WARNING|DEBUG|TRACE|CRITICAL)\s*\|', line)
-        if match:
-            return match.group(1)
-        return None
-    
     def is_target_log_line(self, line: str) -> bool:
         """检查是否是目标日志行（SummaryNode）
         
@@ -149,11 +134,6 @@ class LogMonitor:
         - 包含错误关键词的日志（JSON解析失败、JSON修复失败等）
         """
         # 排除 ERROR 级别的日志
-        log_level = self.get_log_level(line)
-        if log_level == 'ERROR':
-            return False
-        
-        # 兼容旧检查方式
         if "| ERROR" in line or "| ERROR    |" in line:
             return False
         
