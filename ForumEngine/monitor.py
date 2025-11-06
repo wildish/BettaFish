@@ -19,6 +19,7 @@ try:
     HOST_AVAILABLE = True
 except ImportError:
     logger.exception("ForumEngine: 论坛主持人模块未找到，将以纯监控模式运行")
+    logger.exception("ForumEngine: 论坛主持人模块未找到，将以纯监控模式运行")
     HOST_AVAILABLE = False
 
 class LogMonitor:
@@ -119,14 +120,6 @@ class LogMonitor:
                     f.flush()
         except Exception as e:
             logger.exception(f"ForumEngine: 写入forum.log失败: {e}")
-<<<<<<< HEAD
-   
-    def is_target_log_line(self, line: str) -> bool:
-        """检查是否是目标日志行（SummaryNode）"""
-        # 简单字符串包含检查，更可靠
-        for node_name in self.target_nodes:
-            if node_name in line:
-=======
     
     def get_log_level(self, line: str) -> Optional[str]:
         """检测日志行的级别（INFO/ERROR/WARNING/DEBUG等）
@@ -189,7 +182,6 @@ class LogMonitor:
         # 检查是否包含目标节点模式
         for pattern in self.target_node_patterns:
             if pattern in line:
->>>>>>> 183e5e6 (1. 修复论坛通信问题，基于日志块增加容错)
                 return True
         return False
     
