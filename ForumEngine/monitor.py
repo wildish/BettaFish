@@ -19,7 +19,6 @@ try:
     HOST_AVAILABLE = True
 except ImportError:
     logger.exception("ForumEngine: 论坛主持人模块未找到，将以纯监控模式运行")
-    logger.exception("ForumEngine: 论坛主持人模块未找到，将以纯监控模式运行")
     HOST_AVAILABLE = False
 
 class LogMonitor:
@@ -120,12 +119,33 @@ class LogMonitor:
                     f.flush()
         except Exception as e:
             logger.exception(f"ForumEngine: 写入forum.log失败: {e}")
-   
+    
     def is_target_log_line(self, line: str) -> bool:
-        """检查是否是目标日志行（SummaryNode）"""
-        # 简单字符串包含检查，更可靠
-        for node_name in self.target_nodes:
-            if node_name in line:
+        """检查是否是目标日志行（SummaryNode）
+        
+        支持多种识别方式：
+        1. 类名：FirstSummaryNode, ReflectionSummaryNode
+        2. 完整模块路径：InsightEngine.nodes.summary_node、MediaEngine.nodes.summary_node、QueryEngine.nodes.summary_node
+        3. 部分模块路径：nodes.summary_node（兼容性）
+        4. 关键标识文本：正在生成首次段落总结、正在生成反思总结
+        
+        排除条件：
+        - ERROR 级别的日志（错误日志不应被识别为目标节点）
+        - 包含错误关键词的日志（JSON解析失败、JSON修复失败等）
+        """
+        # 排除 ERROR 级别的日志
+        if "| ERROR" in line or "| ERROR    |" in line:
+            return False
+        
+        # 排除包含错误关键词的日志
+        error_keywords = ["JSON解析失败", "JSON修复失败", "Traceback", "File \""]
+        for keyword in error_keywords:
+            if keyword in line:
+                return False
+        
+        # 检查是否包含目标节点模式
+        for pattern in self.target_node_patterns:
+            if pattern in line:
                 return True
         return False
     
@@ -400,7 +420,7 @@ class LogMonitor:
             if not line.strip():
                 continue
                 
-            # 检查是否是目标节点行或包含JSON开始标记的行
+            # 检查是否是目标节点行和JSON开始标记
             is_target = self.is_target_log_line(line)
             is_json_start = self.is_json_start_line(line)
             
