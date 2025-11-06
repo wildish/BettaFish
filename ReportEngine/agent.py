@@ -1234,115 +1234,27 @@ class ReportAgent:
 *生成时间：{generation_time}*
 """
     
-    def _save_report(self, html_content: str, document_ir: Dict[str, Any], report_id: str) -> Dict[str, Any]:
-        """
-        保存HTML与IR到文件并返回路径信息。
-
-        生成基于查询和时间戳的易读文件名，同时也把运行态的
-        `ReportState` 写入 JSON，方便下游排障或断点续跑。
-
-        参数:
-            html_content: 渲染后的HTML正文。
-            document_ir: Document IR结构化数据。
-            report_id: 当前任务ID，用于创建独立文件名。
-
-        返回:
-            dict: 记录HTML/IR/State文件的绝对与相对路径信息。
-        """
+    def _save_report(self, html_content: str):
+        """保存报告到文件"""
+        # 生成文件名
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        query_safe = "".join(
-            c for c in self.state.metadata.query if c.isalnum() or c in (" ", "-", "_")
-        ).rstrip()
-        query_safe = query_safe.replace(" ", "_")[:30] or "report"
-
-        html_filename = f"final_report_{query_safe}_{timestamp}.html"
-        html_path = Path(self.config.OUTPUT_DIR) / html_filename
-        html_path.write_text(html_content, encoding="utf-8")
-        html_abs = str(html_path.resolve())
-        html_rel = os.path.relpath(html_abs, os.getcwd())
-
-        ir_path = self._save_document_ir(document_ir, query_safe, timestamp)
-        ir_abs = str(ir_path.resolve())
-        ir_rel = os.path.relpath(ir_abs, os.getcwd())
-
-        state_filename = f"report_state_{query_safe}_{timestamp}.json"
-        state_path = Path(self.config.OUTPUT_DIR) / state_filename
-        self.state.save_to_file(str(state_path))
-        state_abs = str(state_path.resolve())
-        state_rel = os.path.relpath(state_abs, os.getcwd())
-
-        logger.info(f"HTML报告已保存: {html_path}")
-        logger.info(f"Document IR已保存: {ir_path}")
-        logger.info(f"状态已保存到: {state_path}")
+        query_safe = "".join(c for c in self.state.metadata.query if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        query_safe = query_safe.replace(' ', '_')[:30]
         
-        return {
-            'report_filename': html_filename,
-            'report_filepath': html_abs,
-            'report_relative_path': html_rel,
-            'ir_filename': ir_path.name,
-            'ir_filepath': ir_abs,
-            'ir_relative_path': ir_rel,
-            'state_filename': state_filename,
-            'state_filepath': state_abs,
-            'state_relative_path': state_rel,
-        }
-
-    def _save_document_ir(self, document_ir: Dict[str, Any], query_safe: str, timestamp: str) -> Path:
-        """
-        将整本IR写入独立目录。
-
-        `Document IR` 与 HTML 解耦保存，便于调试渲染差异以及
-        在不重新跑 LLM 的情况下再次渲染或导出其他格式。
-
-        参数:
-            document_ir: 整本报告的IR结构。
-            query_safe: 已清洗的查询短语，用于文件命名。
-            timestamp: 运行时间戳，保证文件名唯一。
-
-        返回:
-            Path: 指向保存后的IR文件路径。
-        """
-        filename = f"report_ir_{query_safe}_{timestamp}.json"
-        ir_path = Path(self.config.DOCUMENT_IR_OUTPUT_DIR) / filename
-        ir_path.write_text(
-            json.dumps(document_ir, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return ir_path
-    
-    def _persist_planning_artifacts(
-        self,
-        run_dir: Path,
-        layout_design: Dict[str, Any],
-        word_plan: Dict[str, Any],
-        template_overview: Dict[str, Any],
-    ):
-        """
-        将文档设计稿、篇幅规划与模板概览另存成JSON。
-
-        这些中间件文件（document_layout/word_plan/template_overview）
-        方便在调试或复盘时快速定位：标题/目录/主题是如何确定的、
-        字数分配有什么要求，以便后续人工校正。
-
-        参数:
-            run_dir: 章节输出根目录。
-            layout_design: 文档布局节点的原始输出。
-            word_plan: 篇幅规划节点输出。
-            template_overview: 模板概览JSON。
-        """
-        artifacts = {
-            "document_layout": layout_design,
-            "word_plan": word_plan,
-            "template_overview": template_overview,
-        }
-        for name, payload in artifacts.items():
-            if not payload:
-                continue
-            path = run_dir / f"{name}.json"
-            try:
-                path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception as exc:
-                logger.warning(f"写入{name}失败: {exc}")
+        filename = f"final_report_{query_safe}_{timestamp}.html"
+        filepath = os.path.join(self.config.OUTPUT_DIR, filename)
+        
+        # 保存HTML报告
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        logger.info(f"报告已保存到: {filepath}")
+        
+        # 保存状态
+        state_filename = f"report_state_{query_safe}_{timestamp}.json"
+        state_filepath = os.path.join(self.config.OUTPUT_DIR, state_filename)
+        self.state.save_to_file(state_filepath)
+        logger.info(f"状态已保存到: {state_filepath}")
     
     def get_progress_summary(self) -> Dict[str, Any]:
         """获取进度摘要，直接返回可序列化的状态字典供API层查询。"""
