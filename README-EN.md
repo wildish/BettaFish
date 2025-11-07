@@ -323,7 +323,35 @@ INSIGHT_ENGINE_MODEL_NAME=
 # Media Agent
 ...
 ```
-Recommended LLM API Provider: [aihubmix](https://aihubmix.com/?aff=8Ds9)
+Recommended LLM API Provider: [Reasoning Era](https://aihubmix.com/?aff=8Ds9)
+
+#### 4.2 Database Initialization
+
+**Option 1: Use Local Database**
+
+> ~~The MindSpider crawler system and the public opinion system are independent of each other, so you need to configure `MindSpider\config.py`. Copy the `config.py.example` file in the `MindSpider` folder and rename it to `config.py`.~~
+> Configuration has been changed to be based on environment variables. Please copy the `.env.example` file in the project root directory to `.env` and fill in all configurations in it.
+
+```bash
+# Local MySQL database initialization
+cd MindSpider
+# Project initialization, deprecated, initialization is now automatic.
+python main.py --setup
+
+```
+
+**Option 2: Use Cloud Database Service (Recommended)**
+
+We provide convenient cloud database service with 100,000+ daily real public opinion data, currently **free application**!
+
+- Real public opinion data, updated in real-time
+- Multi-dimensional tag classification
+- High-availability cloud service
+- Professional technical support
+
+**Contact us to apply for free cloud database access: 📧 670939375@qq.com**
+
+> To conduct a data compliance review and service upgrade, we are suspending new applications for the cloud database, effective October 1, 2025.
 
 ### 5. Launch System
 
@@ -636,11 +664,10 @@ This project is licensed under the [GPL-2.0 License](LICENSE). Please see the LI
 
 ### Get Help
 
-  FAQ: https://github.com/666ghj/BettaFish/issues/185
-
-- **Project Homepage**: [GitHub Repository](https://github.com/666ghj/BettaFish)
-- **Issue Reporting**: [Issues Page](https://github.com/666ghj/BettaFish/issues)
-- **Feature Requests**: [Discussions Page](https://github.com/666ghj/BettaFish/discussions)
+- **Project Homepage**: [GitHub Repository](https://github.com/666ghj/Weibo_PublicOpinion_AnalysisSystem)
+- **FAQ**: [Frequently Asked Questions](https://github.com/666ghj/BettaFish/issues/185)
+- **Issue Reporting**: [Issues Page](https://github.com/666ghj/Weibo_PublicOpinion_AnalysisSystem/issues)
+- **Feature Requests**: [Discussions Page](https://github.com/666ghj/Weibo_PublicOpinion_AnalysisSystem/discussions)
 
 ### Contact Information
 

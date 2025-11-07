@@ -328,6 +328,33 @@ INSIGHT_ENGINE_MODEL_NAME=
 ```
 推荐LLM API供应商：[推理时代](https://aihubmix.com/?aff=8Ds9)
 
+#### 4.2 数据库初始化
+
+**选择1：使用本地数据库**
+
+> ~~MindSpider爬虫系统跟舆情系统是各自独立的，所以需要再去`MindSpider\config.py`配置一下，复制`MindSpider`文件夹下的 `config.py.example` 文件，命名为 `config.py`~~  
+现版本已更改为基于环境变量配置，请复制项目根目录.env.example文件为.env文件，并在其中填写各项配置
+```bash
+# 本地MySQL数据库初始化
+cd MindSpider
+# 项目初始化（废弃，已自动初始化）
+python main.py --setup
+
+```
+
+**选择2：使用云数据库服务（推荐）**
+
+我们提供便捷的云数据库服务，包含日均10万+真实舆情数据，目前**免费申请**！
+
+- 真实舆情数据，实时更新
+- 多维度标签分类
+- 高可用云端服务
+- 专业技术支持
+
+**联系我们申请免费云数据库访问：📧 670939375@qq.com**
+
+> 为进行数据合规性审查与服务升级，云数据库自2025年10月1日起暂停接收新的使用申请
+
 ### 5. 启动系统
 
 #### 5.1 完整系统启动（推荐）
@@ -637,11 +664,10 @@ class DeepSearchAgent:
 
 ### 获取帮助
 
-常见问题解答：https://github.com/666ghj/BettaFish/issues/185
-
-- **项目主页**：[GitHub仓库](https://github.com/666ghj/BettaFish)
-- **问题反馈**：[Issues页面](https://github.com/666ghj/BettaFish/issues)
-- **功能建议**：[Discussions页面](https://github.com/666ghj/BettaFish/discussions)
+- **项目主页**：[GitHub仓库](https://github.com/666ghj/Weibo_PublicOpinion_AnalysisSystem)
+- **常见问题解答**：[FAQ](https://github.com/666ghj/BettaFish/issues/185)
+- **问题反馈**：[Issues页面](https://github.com/666ghj/Weibo_PublicOpinion_AnalysisSystem/issues)
+- **功能建议**：[Discussions页面](https://github.com/666ghj/Weibo_PublicOpinion_AnalysisSystem/discussions)
 
 ### 联系方式
 
