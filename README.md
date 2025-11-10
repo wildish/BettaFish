@@ -606,20 +606,9 @@ class DeepSearchAgent:
 
 我们欢迎所有形式的贡献！
 
-### 如何贡献
-
-1. **Fork项目**到您的GitHub账号
-2. **创建Feature分支**：`git checkout -b feature/AmazingFeature`
-3. **提交更改**：`git commit -m 'Add some AmazingFeature'`
-4. **推送到分支**：`git push origin feature/AmazingFeature`
-5. **开启Pull Request**
-
-### 开发规范
-
-- 代码遵循PEP8规范
-- 提交信息使用清晰的中英文描述
-- 新功能需要包含相应的测试用例
-- 更新相关文档
+**请阅读以下贡献指南：**  
+- [CONTRIBUTING.md](./CONTRIBUTING.md)（中文）  
+- [CONTRIBUTING-EN.md](./CONTRIBUTING-EN.md)（English）
 
 ## 🦖 下一步开发计划
 
