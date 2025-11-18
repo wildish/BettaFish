@@ -3702,71 +3702,53 @@
         }
 
         async function downloadPdfFromPreview() {
-            const iframe = document.getElementById('report-iframe');
             const btn = document.getElementById('downloadPdfButton');
-            if (!iframe || !iframe.contentDocument) {
-                showMessage('请先加载报告预览再下载PDF', 'error');
+            const taskId = btn?.dataset.taskId;
+
+            if (!taskId) {
+                showMessage('无可用的报告任务，请先生成报告', 'error');
                 return;
             }
-            const target = iframe.contentDocument.documentElement;
-            if (!target) {
-                showMessage('报告内容未就绪', 'error');
-                return;
-            }
+
             if (btn) btn.disabled = true;
-            showMessage('正在生成PDF，请稍候...', 'info');
+            showMessage('正在生成优化的PDF，请稍候...', 'info');
+
             try {
-                const { jsPDF } = window.jspdf || {};
-                if (!jsPDF) {
-                    throw new Error('PDF依赖未加载');
-                }
-                const pdf = new jsPDF('p', 'mm', 'a4');
-
-                // 添加中文字体支持
-                try {
-                    const fontData = iframe.contentWindow.pdfFontData || window.pdfFontData;
-                    if (fontData) {
-                        pdf.addFileToVFS('SourceHanSerifSC-Medium.otf', fontData);
-                        pdf.addFont('SourceHanSerifSC-Medium.otf', 'SourceHanSerif', 'normal');
-                        pdf.setFont('SourceHanSerif');
-                        console.log('PDF字体已加载：SourceHanSerif');
-                    } else {
-                        console.warn('PDF字体数据未找到，将使用默认字体');
-                    }
-                } catch (fontErr) {
-                    console.warn('PDF字体加载失败:', fontErr);
-                }
-
-                const pageWidth = pdf.internal.pageSize.getWidth();
-                const pxWidth = Math.max(target.scrollWidth || 0, Math.round(pageWidth * 3.78));
-                const renderTask = pdf.html(target, {
-                    x: 10,
-                    y: 10,
-                    width: pageWidth - 20,
-                    windowWidth: pxWidth,
-                    margin: [10, 10, 16, 10],
-                    autoPaging: 'text',
-                    html2canvas: {
-                        scale: Math.min(1.5, Math.max(1.0, pageWidth / (target.clientWidth || pageWidth))),
-                        useCORS: true,
-                        scrollX: 0,
-                        scrollY: -iframe.contentWindow.scrollY,
-                        logging: false,
-                        allowTaint: true,
-                        backgroundColor: '#ffffff'
-                    },
-                    pagebreak: {
-                        mode: ['css', 'legacy'],
-                        avoid: ['.chapter', '.callout', '.chart-card', '.table-wrap', '.kpi-grid', '.hero-section'],
-                        before: '.chapter-divider'
-                    }
+                // 调用后端PDF导出API
+                const response = await fetch(`/api/report/export/pdf/${taskId}?optimize=true`, {
+                    method: 'GET'
                 });
-                await (renderTask && typeof renderTask.then === 'function' ? renderTask : Promise.resolve());
-                pdf.save('report.pdf');
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'PDF导出失败');
+                }
+
+                // 获取PDF文件名（从响应头）
+                const contentDisposition = response.headers.get('Content-Disposition');
+                let filename = 'report.pdf';
+                if (contentDisposition) {
+                    const matches = /filename="?([^"]+)"?/.exec(contentDisposition);
+                    if (matches && matches[1]) {
+                        filename = matches[1];
+                    }
+                }
+
+                // 下载PDF
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                window.URL.revokeObjectURL(url);
+
                 showMessage('PDF生成完成，已开始下载', 'success');
             } catch (err) {
-                console.error('生成PDF失败:', err);
-                showMessage('生成PDF失败: ' + err.message, 'error');
+                console.error('导出PDF失败:', err);
+                showMessage('导出PDF失败: ' + err.message, 'error');
             } finally {
                 if (btn) btn.disabled = false;
             }
