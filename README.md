@@ -317,17 +317,79 @@ pip install -r requirements.txt
 
 # uv版本命令（更快速安装）
 uv pip install -r requirements.txt
-# 如果不想使用本地情感分析模型（算力需求很小，默认安装cpu版本），可以将该文件中的“机器学习”部分注释掉再执行指令
+# 如果不想使用本地情感分析模型（算力需求很小，默认安装cpu版本），可以将该文件中的"机器学习"部分注释掉再执行指令
 ```
 
-### 3. 安装Playwright浏览器驱动
+### 3. 安装 PDF 导出所需系统依赖（可选）
+
+> ⚠️ **注意**：如果您需要使用 PDF 导出功能，请按照以下步骤安装系统依赖。如果不需要 PDF 导出功能，可以跳过此步骤，系统其他功能不受影响。
+
+<details>
+<summary><b>📦 macOS 系统安装步骤</b></summary>
+
+```bash
+# 1. 安装系统依赖（在宿主机上执行）
+brew install pango gdk-pixbuf libffi
+
+# 2. 设置环境变量（必需）
+export DYLD_LIBRARY_PATH=/opt/homebrew/lib:$DYLD_LIBRARY_PATH
+
+# 或永久添加到 ~/.zshrc
+echo 'export DYLD_LIBRARY_PATH=/opt/homebrew/lib:$DYLD_LIBRARY_PATH' >> ~/.zshrc
+source ~/.zshrc
+```
+
+</details>
+
+<details>
+<summary><b>🐧 Ubuntu/Debian 系统安装步骤</b></summary>
+
+```bash
+# 1. 安装系统依赖（在宿主机上执行）
+sudo apt-get update
+sudo apt-get install -y \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libgdk-pixbuf2.0-0 \
+    libffi-dev \
+    libcairo2
+```
+
+</details>
+
+<details>
+<summary><b>🎩 CentOS/RHEL 系统安装步骤</b></summary>
+
+```bash
+# 1. 安装系统依赖（在宿主机上执行）
+sudo yum install -y pango gdk-pixbuf2 libffi-devel cairo
+```
+
+</details>
+
+<details>
+<summary><b>🪟 Windows 系统安装步骤</b></summary>
+
+```powershell
+# 1. 下载并安装 GTK3 Runtime（在宿主机上执行）
+# 访问：https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer/releases
+# 下载最新版本的 .exe 文件并安装
+
+# 2. 重启命令行或 IDE
+```
+
+</details>
+
+> 💡 **提示**：如果使用 Docker 部署，无需手动安装这些依赖，Docker 镜像已包含所有必要的系统依赖。
+
+### 4. 安装Playwright浏览器驱动
 
 ```bash
 # 安装浏览器驱动（用于爬虫功能）
 playwright install chromium
 ```
 
-### 4. 配置LLM与数据库
+### 5. 配置LLM与数据库
 
 复制一份项目根目录 `.env.example` 文件，命名为 `.env`
 
@@ -366,36 +428,9 @@ INSIGHT_ENGINE_MODEL_NAME=
 ```
 推荐LLM API供应商：[推理时代](https://aihubmix.com/?aff=8Ds9)
 
-#### 4.2 数据库初始化
+### 6. 启动系统
 
-**选择1：使用本地数据库**
-
-> ~~MindSpider爬虫系统跟舆情系统是各自独立的，所以需要再去`MindSpider\config.py`配置一下，复制`MindSpider`文件夹下的 `config.py.example` 文件，命名为 `config.py`~~  
-现版本已更改为基于环境变量配置，请复制项目根目录.env.example文件为.env文件，并在其中填写各项配置
-```bash
-# 本地MySQL数据库初始化
-cd MindSpider
-# 项目初始化（废弃，已自动初始化）
-python main.py --setup
-
-```
-
-**选择2：使用云数据库服务（推荐）**
-
-我们提供便捷的云数据库服务，包含日均10万+真实舆情数据，目前**免费申请**！
-
-- 真实舆情数据，实时更新
-- 多维度标签分类
-- 高可用云端服务
-- 专业技术支持
-
-**联系我们申请免费云数据库访问：📧 670939375@qq.com**
-
-> 为进行数据合规性审查与服务升级，云数据库自2025年10月1日起暂停接收新的使用申请
-
-### 5. 启动系统
-
-#### 5.1 完整系统启动（推荐）
+#### 6.1 完整系统启动（推荐）
 
 ```bash
 # 在项目根目录下，激活conda环境
@@ -416,13 +451,13 @@ python app.py
 
 > 注1：一次运行终止后，streamlit app可能结束异常仍然占用端口，此时搜索占用端口的进程kill掉即可
 
-> 注2：数据爬取需要单独操作，见5.3指引
+> 注2：数据爬取需要单独操作，见6.3指引
 
 > 注3：如果服务器远程部署出现页面显示问题，见[PR#45](https://github.com/666ghj/BettaFish/pull/45)
 
 访问 http://localhost:5000 即可使用完整系统
 
-#### 5.2 单独启动某个Agent
+#### 6.2 单独启动某个Agent
 
 ```bash
 # 启动QueryEngine
@@ -435,7 +470,7 @@ streamlit run SingleEngineApp/media_engine_streamlit_app.py --server.port 8502
 streamlit run SingleEngineApp/insight_engine_streamlit_app.py --server.port 8501
 ```
 
-#### 5.3 爬虫系统单独使用
+#### 6.3 爬虫系统单独使用
 
 这部分有详细的配置文档：[MindSpider使用说明](./MindSpider/README.md)
 
