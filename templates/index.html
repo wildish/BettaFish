@@ -329,7 +329,7 @@
         }
 
         .console-layer {
-            visibility: hidden;      /* 使用visibility替代display，避免重排 */
+            /* 【优化】使用transform代替visibility，GPU加速避免重绘 */
             position: absolute;      /* 相对于.console-output绝对定位 */
             top: 0;
             left: 0;
@@ -338,18 +338,54 @@
             padding: 15px;           /* 图层内边距 */
             overflow-y: auto;        /* 允许独立滚动 */
             overflow-x: hidden;
-            pointer-events: none;    /* 隐藏层不响应交互 */
             box-sizing: border-box;  /* 包含padding在width/height内 */
+            /* GPU加速优化 */
+            transform: translateX(100%);  /* 默认移出视图 */
+            will-change: transform;       /* 提示浏览器优化transform */
+            backface-visibility: hidden;  /* 避免闪烁 */
+            -webkit-backface-visibility: hidden;
+            opacity: 0;                   /* 配合transform使用 */
+            pointer-events: none;          /* 隐藏层不响应交互 */
+            /* 平滑切换 */
+            transition: transform 0.15s ease-out, opacity 0.15s ease-out;
         }
 
         .console-layer.active {
-            visibility: visible;     /* 显示活动层 */
-            pointer-events: auto;    /* 活动层响应交互 */
-            z-index: 1;             /* 置顶显示 */
+            /* 【优化】活动层使用transform归位，高性能切换 */
+            transform: translateX(0);    /* 移回视图 */
+            opacity: 1;                  /* 完全可见 */
+            pointer-events: auto;        /* 活动层响应交互 */
+            z-index: 1;                  /* 置顶显示 */
         }
 
         .console-line {
             margin-bottom: 2px;
+        }
+
+        /* 【新增】加载状态指示器样式 */
+        .console-line.loading-indicator {
+            color: #00ff00;
+            font-style: italic;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        .console-line.render-progress {
+            color: #00ff00;
+            background: linear-gradient(90deg, rgba(0,255,0,0.1) 0%, transparent 100%);
+            padding: 2px 5px;
+            border-left: 3px solid #00ff00;
+            font-weight: bold;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
+        }
+
+        /* 渐进式渲染时的占位符 */
+        .console-line.placeholder {
+            opacity: 0.5;
+            font-style: italic;
         }
 
         /* 状态信息 */
@@ -1379,8 +1415,8 @@
                 this.pool = [];
                 this.lineHeight = 18;
                 this.maxVisible = 120;
-                this.maxLines = 1000; // 【优化】增加到1000行，提高缓存能力
-                this.trimTarget = 600; // 【优化】裁剪后保留600行
+                this.maxLines = 10000; // 【优化】保留10000行历史，平衡内存和使用体验
+                this.trimTarget = 8000; // 【优化】裁剪后保留8000行，避免频繁触发trim
                 this.maxPoolSize = 200; // 限制DOM节点池大小
                 this.rafId = null;
                 this.autoScrollEnabled = true;
@@ -1394,9 +1430,9 @@
                 this.beforeSpacer = null;
                 this.afterSpacer = null;
 
-                // 【新增】批处理优化参数
-                this.batchThreshold = 200; // 累积200行才flush（原50行）
-                this.batchDelay = 500; // 延迟500ms才flush（原200ms）
+                // 【优化】批处理参数 - 降低延迟提升响应速度
+                this.batchThreshold = 50; // 累积50行就flush，减少延迟
+                this.batchDelay = 100; // 延迟100ms就flush，大幅降低延迟
                 this.lastFlushTime = 0;
                 this.flushCount = 0;
 
@@ -1560,39 +1596,40 @@
             scrollToBottom() {
                 if (!this.scrollElement) return;
 
-                // 【FIX Bug #6】使用try-catch防止死锁
-                try {
-                    // 使用锁防止重入
-                    if (this.scrollLocked) return;
-                    this.scrollLocked = true;
-
-                    // 【FIX Bug #2】不使用节流，确保每次调用都能滚动
-                    // 移除节流逻辑，因为scheduleRender已经有节流了
-
-                    // 使用 requestAnimationFrame 确保在下一帧执行，避免闪烁
-                    requestAnimationFrame(() => {
-                        try {
-                            if (!this.scrollElement) {
-                                this.scrollLocked = false;
-                                return;
-                            }
-
-                            // 直接滚动到底部，不使用平滑滚动以避免性能问题
-                            const targetScroll = this.scrollElement.scrollHeight;
-                            this.scrollElement.scrollTop = targetScroll;
-
-                            // 【FIX Bug #2】立即重置标志，不延迟
-                            this.scrollLocked = false;
-                            this.needsScroll = false;
-                        } catch (e) {
-                            console.error('滚动到底部失败:', e);
-                            this.scrollLocked = false; // 确保锁被释放
-                        }
-                    });
-                } catch (e) {
-                    console.error('scrollToBottom失败:', e);
-                    this.scrollLocked = false; // 确保锁被释放
+                // 【优化】防抖机制，避免频繁滚动
+                if (this.scrollTimer) {
+                    clearTimeout(this.scrollTimer);
                 }
+
+                // 使用微任务延迟，减少layout thrashing
+                this.scrollTimer = setTimeout(() => {
+                    if (!this.scrollElement) return;
+
+                    // 【优化】批量读取layout属性，减少重排
+                    const scrollData = {
+                        scrollHeight: this.scrollElement.scrollHeight,
+                        clientHeight: this.scrollElement.clientHeight,
+                        currentScroll: this.scrollElement.scrollTop
+                    };
+
+                    // 计算目标位置
+                    const targetScroll = scrollData.scrollHeight - scrollData.clientHeight;
+
+                    // 只在需要时滚动
+                    if (Math.abs(scrollData.currentScroll - targetScroll) > 1) {
+                        // 使用requestAnimationFrame确保在合适的时机滚动
+                        requestAnimationFrame(() => {
+                            if (this.scrollElement) {
+                                this.scrollElement.scrollTop = targetScroll;
+                            }
+                            this.needsScroll = false;
+                        });
+                    } else {
+                        this.needsScroll = false;
+                    }
+
+                    this.scrollTimer = null;
+                }, 16); // 约1帧的时间，减少频繁触发
             }
 
             setLineHeight(px) {
@@ -1600,20 +1637,67 @@
             }
 
             /**
-             * 【图层优化】设置窗口激活状态
+             * 【优化】设置窗口激活状态，分批异步渲染积压内容
              * @param {boolean} active - 是否为活动窗口
              */
             setActive(active) {
+                const wasInactive = !this.isActive;
                 this.isActive = active;
-                if (active && this.needsRender) {
-                    // 窗口激活时，如果有待渲染内容，异步渲染
-                    requestIdleCallback(() => {
-                        if (this.pending.length > 0) {
-                            this.flush();
-                        }
-                        this.scheduleRender(true);
+
+                if (active) {
+                    // 【修复】窗口激活时，清除渲染哈希，确保强制渲染
+                    // 这解决了需要滚动才能显示内容的Bug
+                    if (wasInactive) {
+                        this.lastRenderHash = null;  // 清除哈希，强制重新渲染
+                        console.log('[窗口激活] 清除渲染哈希，准备强制渲染');
+                    }
+
+                    // 处理积压的pending数据
+                    if (this.pending.length > 0) {
+                        // 窗口激活时，分批处理积压内容
+                        const batchSize = 100; // 每批处理100行
+                        const renderBatch = () => {
+                            if (this.pending.length > 0) {
+                                // 取出一批数据进行flush
+                                const batch = this.pending.splice(0, Math.min(batchSize, this.pending.length));
+                                this.lines.push(...batch);
+                                this.flushCount++;
+                                this.lastFlushTime = Date.now();
+
+                                // 如果还有剩余，继续下一批
+                                if (this.pending.length > 0) {
+                                    requestAnimationFrame(renderBatch);
+                                } else {
+                                    // 所有数据处理完，执行渲染
+                                    this.needsRender = false;
+                                    // 根据数据量选择渲染方式
+                                    if (this.lines.length > 1000) {
+                                        this.progressiveRender();  // 大量数据用渐进式渲染
+                                    } else {
+                                        this.scheduleRender(true);  // 强制渲染
+                                    }
+                                }
+                            }
+                        };
+                        requestAnimationFrame(renderBatch);
+                    } else if (this.needsRender || wasInactive) {
+                        // 【关键修复】即使needsRender为false，从非活动切换到活动也要渲染
                         this.needsRender = false;
-                    }, { timeout: 50 });
+
+                        // 强制渲染一次，确保内容显示
+                        if (this.lines.length > 1000) {
+                            this.progressiveRender();  // 大量数据用渐进式渲染
+                        } else {
+                            this.scheduleRender(true);  // 强制渲染
+                        }
+
+                        // 如果需要自动滚动到底部
+                        if (this.autoScrollEnabled && this.lines.length > 0) {
+                            requestAnimationFrame(() => {
+                                this.scrollToBottom();
+                            });
+                        }
+                    }
                 }
             }
 
@@ -1630,15 +1714,23 @@
                     this.pendingHighWaterMark = this.pending.length;
                 }
 
-                // 【图层优化】非活动窗口处理策略
+                // 【优化】非活动窗口延迟渲染策略
                 if (!this.isActive) {
-                    // 非活动窗口：只累积数据，不触发渲染
-                    // 设置队列上限，防止内存溢出
-                    if (this.pending.length >= 1000) {
-                        this.flush();  // 定期flush避免内存溢出
+                    // 非活动窗口：延迟渲染，但不完全停止
+                    // 每500ms或累积100行就flush一次，保持数据流动
+                    if (this.pending.length >= 100 ||
+                        (this.pending.length > 0 && Date.now() - this.lastFlushTime > 500)) {
+                        this.flush();  // 定期flush，避免积压太多
                         this.needsRender = true;  // 标记需要渲染
                     }
-                    return;  // 跳过后续渲染逻辑
+                    // 不立即渲染，但设置延迟渲染
+                    if (this.pending.length === 1 && !this.flushTimer) {
+                        this.flushTimer = setTimeout(() => {
+                            this.flush();
+                            this.needsRender = true;
+                        }, 500);  // 非活动窗口500ms延迟
+                    }
+                    return;  // 跳过立即渲染
                 }
 
                 // 【优化】活动窗口：智能批处理策略
@@ -1656,10 +1748,10 @@
                         clearTimeout(this.flushTimer);
                     }
 
-                    // 【优化】自适应延迟：如果最近flush频繁，说明日志流量大，缩短延迟
+                    // 【优化】自适应延迟：根据流量动态调整延迟，提升响应速度
                     const adaptiveDelay = (timeSinceLastFlush < 1000)
-                        ? Math.max(100, this.batchDelay / 2)  // 高流量：缩短延迟
-                        : this.batchDelay; // 正常流量：使用标准延迟
+                        ? Math.max(20, this.batchDelay / 4)  // 高流量：大幅缩短延迟至20-25ms
+                        : this.batchDelay; // 正常流量：使用标准延迟100ms
 
                     this.flushTimer = setTimeout(() => {
                         this.flush();
@@ -1715,7 +1807,7 @@
             }
 
             maybeTrim() {
-                // 【优化】更积极的trim策略，但保留更多行
+                // 【优化】智能内存管理策略
                 if (this.lines.length <= this.maxLines) return;
 
                 const toDrop = this.lines.length - this.trimTarget;
@@ -1727,6 +1819,12 @@
                     this.lastRenderHash = null;
 
                     console.log(`[内存管理] 裁剪${toDrop}行日志，当前保留${this.lines.length}行`);
+
+                    // 【优化】内存使用超过阈值时，强制垃圾回收提示
+                    const estimatedMemory = this.lines.length * 100 + this.pending.length * 100;
+                    if (estimatedMemory > 5 * 1024 * 1024) { // 超过5MB
+                        console.warn('[内存警告] 日志内存使用较高，建议刷新页面');
+                    }
                 }
             }
 
@@ -1756,13 +1854,21 @@
                     // 【优化】性能监控：记录渲染开始时间
                     const renderStart = performance.now();
 
-                    this.render();
+                    // 【优化】根据数据量选择渲染策略
+                    const totalLines = this.lines.length + this.pending.length;
+                    if (totalLines > 1000) {
+                        // 大量数据使用渐进式渲染
+                        this.progressiveRender();
+                    } else {
+                        // 少量数据直接渲染
+                        this.render();
+                    }
 
                     // 【优化】记录渲染耗时
                     this.renderTime = performance.now() - renderStart;
 
                     // 【性能警告】如果渲染耗时超过16ms（一帧），输出警告
-                    if (this.renderTime > 16) {
+                    if (this.renderTime > 16 && totalLines < 1000) {
                         console.warn(`[性能警告] 渲染耗时${this.renderTime.toFixed(2)}ms，超过一帧时间（16ms）`);
                     }
                 });
@@ -1783,15 +1889,16 @@
                     return;
                 }
 
-                // 【优化】改进内容哈希：使用总行数+最后一行文本
+                // 【优化】改进内容哈希：包含活动状态，确保窗口切换时渲染
                 const lastLine = this.lines[total - 1];
-                const contentHash = `${total}-${lastLine ? lastLine.text : ''}`;
+                const contentHash = `${total}-${lastLine ? lastLine.text : ''}-${this.isActive}`;
 
-                // 如果需要滚动，强制渲染
-                const forceRender = this.needsScroll && this.autoScrollEnabled;
+                // 检查是否需要强制渲染
+                const forceRender = (this.needsScroll && this.autoScrollEnabled) ||
+                                   !this.container.querySelector('.console-line'); // DOM为空时强制渲染
 
                 if (this.lastRenderHash === contentHash && !forceRender) {
-                    // 内容没有变化且不需要滚动，跳过渲染
+                    // 内容没有变化且不需要强制渲染，跳过
                     return;
                 }
                 this.lastRenderHash = contentHash;
@@ -1802,7 +1909,17 @@
                 const viewport = (this.scrollElement && this.scrollElement.clientHeight) || 1;
                 const visible = Math.max(Math.ceil(viewport / lh) + 20, this.maxVisible);
 
-                const scrollTop = (this.scrollElement && this.scrollElement.scrollTop) || 0;
+                let scrollTop = (this.scrollElement && this.scrollElement.scrollTop) || 0;
+
+                // 【优化】初始渲染时，如果需要自动滚动，从底部开始显示
+                // 这样用户能看到最新的日志而不是最旧的
+                if (scrollTop === 0 && this.autoScrollEnabled && total > visible) {
+                    // 模拟滚动到底部的scrollTop值
+                    scrollTop = Math.max(0, (total - visible) * lh);
+                    // 标记需要实际滚动
+                    this.needsScroll = true;
+                }
+
                 const halfVisible = Math.floor(visible / 2);
                 const rawStart = Math.floor(scrollTop / lh) - halfVisible;
                 const start = Math.max(0, Math.min(total, rawStart));
@@ -1878,33 +1995,232 @@
                 const needsRebuild = !this.beforeSpacer.parentNode || !this.afterSpacer.parentNode;
 
                 if (needsRebuild) {
-                    // 需要完全重建
-                    this.container.innerHTML = '';
-                    this.container.appendChild(this.beforeSpacer);
-                    this.container.appendChild(fragment);
-                    this.container.appendChild(this.afterSpacer);
-                } else {
-                    // 【优化】只更新可见节点部分，使用更高效的方式
-                    const existingNodes = Array.from(this.container.querySelectorAll('.console-line'));
+                    // 【优化】双缓冲渲染 - 避免黑屏空窗期
+                    // 先准备新内容，再一次性替换，保持界面始终有内容显示
 
-                    // 【优化】批量移除，减少重排
-                    if (existingNodes.length > 0) {
-                        // 使用DocumentFragment收集要移除的节点
-                        existingNodes.forEach(node => {
-                            if (node.parentNode === this.container) {
-                                this.container.removeChild(node);
-                            }
-                        });
+                    // 如果容器有内容且是大量日志，显示加载提示
+                    if (this.container.childNodes.length > 0 && total > 500) {
+                        // 创建加载提示
+                        const loadingDiv = document.createElement('div');
+                        loadingDiv.className = 'console-line loading-indicator';
+                        loadingDiv.textContent = `[系统] 正在渲染 ${total} 行日志，请稍候...`;
+                        loadingDiv.style.opacity = '0.7';
+
+                        // 只在容器为空或没有加载提示时添加
+                        if (!this.container.querySelector('.loading-indicator')) {
+                            this.container.insertBefore(loadingDiv, this.container.firstChild);
+                        }
                     }
 
-                    // 在占位符之间插入新节点
-                    this.container.insertBefore(fragment, this.afterSpacer);
+                    // 使用requestAnimationFrame确保加载提示显示
+                    requestAnimationFrame(() => {
+                        // 创建新的内容容器
+                        const newContent = document.createDocumentFragment();
+
+                        // 添加beforeSpacer
+                        newContent.appendChild(this.beforeSpacer);
+
+                        // 添加可见内容
+                        newContent.appendChild(fragment);
+
+                        // 添加afterSpacer
+                        newContent.appendChild(this.afterSpacer);
+
+                        // 一次性替换所有子节点，避免闪烁
+                        // replaceChildren 是原子操作，比 innerHTML = '' 更高效
+                        this.container.replaceChildren(...newContent.childNodes);
+
+                        // 如果需要滚动到底部，延迟执行避免影响渲染
+                        if (this.needsScroll && this.autoScrollEnabled) {
+                            requestAnimationFrame(() => {
+                                this.scrollToBottom();
+                            });
+                        }
+                    });
+                } else {
+                    // 【优化】增量更新：智能diff算法，只更新必要的节点
+                    const existingNodes = Array.from(this.container.querySelectorAll('.console-line'));
+
+                    // 计算需要的节点数量
+                    const needCount = end - start;
+                    const existCount = existingNodes.length;
+
+                    if (existCount === needCount) {
+                        // 节点数量相同，直接替换内容
+                        let i = 0;
+                        for (let idx = start; idx < end; idx++) {
+                            const line = this.lines[idx];
+                            const node = existingNodes[i];
+                            if (node) {
+                                // 只在内容变化时更新
+                                if (node.textContent !== line.text) {
+                                    node.textContent = line.text;
+                                }
+                                if (node.className !== (line.className || 'console-line')) {
+                                    node.className = line.className || 'console-line';
+                                }
+                            }
+                            i++;
+                        }
+                    } else if (existCount > needCount) {
+                        // 节点过多，移除多余的
+                        for (let i = needCount; i < existCount; i++) {
+                            const node = existingNodes[i];
+                            if (node && node.parentNode === this.container) {
+                                this.container.removeChild(node);
+                            }
+                        }
+                        // 更新保留的节点内容
+                        let i = 0;
+                        for (let idx = start; idx < end && i < needCount; idx++) {
+                            const line = this.lines[idx];
+                            const node = existingNodes[i];
+                            if (node) {
+                                if (node.textContent !== line.text) {
+                                    node.textContent = line.text;
+                                }
+                                if (node.className !== (line.className || 'console-line')) {
+                                    node.className = line.className || 'console-line';
+                                }
+                            }
+                            i++;
+                        }
+                    } else {
+                        // 节点不足，复用现有的并添加新的
+                        // 先更新现有节点
+                        let i = 0;
+                        for (; i < existCount; i++) {
+                            const line = this.lines[start + i];
+                            const node = existingNodes[i];
+                            if (node && line) {
+                                if (node.textContent !== line.text) {
+                                    node.textContent = line.text;
+                                }
+                                if (node.className !== (line.className || 'console-line')) {
+                                    node.className = line.className || 'console-line';
+                                }
+                            }
+                        }
+                        // 添加不足的节点
+                        const newFragment = document.createDocumentFragment();
+                        for (let idx = start + existCount; idx < end; idx++) {
+                            const line = this.lines[idx];
+                            const poolIdx = idx - start;
+                            const node = this.pool[poolIdx];
+                            if (node) {
+                                node.className = line.className || 'console-line';
+                                node.textContent = line.text;
+                                newFragment.appendChild(node);
+                            }
+                        }
+                        if (newFragment.childNodes.length > 0) {
+                            this.container.insertBefore(newFragment, this.afterSpacer);
+                        }
+                    }
                 }
 
                 // 【优化】如果需要滚动且自动滚动启用，立即滚动
                 if (this.needsScroll && this.autoScrollEnabled) {
                     this.scrollToBottom();
                 }
+            }
+
+            /**
+             * 【新增】渐进式渲染方法 - 处理大量日志时分批渲染
+             * 避免一次性渲染大量内容导致的卡顿和空窗期
+             */
+            progressiveRender() {
+                if (!this.container || this.isProgressiveRendering) return;
+
+                this.isProgressiveRendering = true;
+                const total = this.lines.length;
+
+                // 只对大量日志启用渐进式渲染
+                if (total <= 500) {
+                    this.render();
+                    this.isProgressiveRendering = false;
+                    return;
+                }
+
+                console.log(`[渐进式渲染] 开始渲染 ${total} 行日志`);
+
+                // 分批参数
+                const batchSize = 200;  // 每批渲染200行
+                let currentBatch = 0;
+                const totalBatches = Math.ceil(total / batchSize);
+
+                // 显示渲染进度
+                const showProgress = () => {
+                    const progress = Math.round((currentBatch / totalBatches) * 100);
+                    const progressDiv = this.container.querySelector('.render-progress');
+                    if (progressDiv) {
+                        progressDiv.textContent = `[系统] 渲染进度: ${progress}% (${Math.min(currentBatch * batchSize, total)}/${total} 行)`;
+                    } else {
+                        const newProgressDiv = document.createElement('div');
+                        newProgressDiv.className = 'console-line render-progress';
+                        newProgressDiv.style.color = '#00ff00';
+                        newProgressDiv.textContent = `[系统] 渲染进度: ${progress}%`;
+                        if (this.container.firstChild) {
+                            this.container.insertBefore(newProgressDiv, this.container.firstChild);
+                        }
+                    }
+                };
+
+                // 渲染一批数据
+                const renderBatch = () => {
+                    const startIdx = currentBatch * batchSize;
+                    const endIdx = Math.min((currentBatch + 1) * batchSize, total);
+
+                    // 创建批量fragment
+                    const batchFragment = document.createDocumentFragment();
+                    for (let i = startIdx; i < endIdx; i++) {
+                        const line = this.lines[i];
+                        const node = document.createElement('div');
+                        node.className = line.className || 'console-line';
+                        node.textContent = line.text;
+                        batchFragment.appendChild(node);
+                    }
+
+                    // 如果是第一批，清理旧内容
+                    if (currentBatch === 0) {
+                        // 保留一个提示，避免完全空白
+                        const placeholder = document.createElement('div');
+                        placeholder.className = 'console-line';
+                        placeholder.textContent = '[系统] 正在加载日志...';
+                        placeholder.style.opacity = '0.5';
+                        this.container.replaceChildren(placeholder);
+                    }
+
+                    // 追加新批次
+                    this.container.appendChild(batchFragment);
+
+                    currentBatch++;
+                    showProgress();
+
+                    // 继续下一批或完成
+                    if (currentBatch < totalBatches) {
+                        requestAnimationFrame(renderBatch);
+                    } else {
+                        // 渲染完成，清理进度提示
+                        const progressDiv = this.container.querySelector('.render-progress');
+                        if (progressDiv) {
+                            progressDiv.remove();
+                        }
+                        console.log(`[渐进式渲染] 完成，共渲染 ${total} 行`);
+                        this.isProgressiveRendering = false;
+
+                        // 完成后触发滚动
+                        if (this.autoScrollEnabled) {
+                            requestAnimationFrame(() => {
+                                this.scrollToBottom();
+                            });
+                        }
+                    }
+                };
+
+                // 开始渲染第一批
+                showProgress();
+                requestAnimationFrame(renderBatch);
             }
         }
 
@@ -3507,8 +3823,20 @@
         }
 
         // 加载论坛日志
+        let forumLogPosition = 0;  // 记录已接收的日志位置
+
         function loadForumLog() {
-            fetch('/api/forum/log')
+            // 【优化】使用历史API获取完整日志
+            fetch('/api/forum/log/history', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    position: 0,  // 从头开始获取所有历史
+                    max_lines: 5000  // 获取最近5000行历史
+                })
+            })
             .then(response => response.json())
             .then(data => {
                 // 【FIX Bug #5】检查是否仍然在forum页面
@@ -3527,35 +3855,59 @@
                     return;
                 }
 
-                const chatArea = document.getElementById('forumChatArea');
-                if (chatArea) {
-                    chatArea.innerHTML = '';
-                }
-
                 const logLines = data.log_lines || [];
-                const parsedMessages = data.parsed_messages || [];
+                forumLogPosition = data.position || 0;  // 记录当前位置
 
+                // 清空并重新加载日志
                 if (logLines.length > 0) {
-                    clearConsoleLayer('forum', '[系统] Forum Engine 日志输出');
+                    clearConsoleLayer('forum', '[系统] Forum Engine 历史日志');
                     logRenderers['forum'].render(); // 立即渲染清空提示
-                    logLines.forEach(line => appendConsoleTextLine('forum', line));
+
+                    // 批量添加历史日志，避免卡顿
+                    const batchSize = 100;
+                    let index = 0;
+
+                    function addBatch() {
+                        const batch = logLines.slice(index, index + batchSize);
+                        batch.forEach(line => appendConsoleTextLine('forum', line));
+                        index += batchSize;
+
+                        if (index < logLines.length && currentApp === 'forum') {
+                            requestAnimationFrame(addBatch);
+                        }
+                    }
+
+                    addBatch();
                 } else {
-                    forumLogLineCount = 0;
+                    clearConsoleLayer('forum', '[系统] Forum Engine 暂无日志');
                 }
 
-                if (parsedMessages.length > 0) {
-                    parsedMessages.forEach(message => addForumMessage(message));
-                }
+                // 同时获取解析的消息（用于聊天区域）
+                fetch('/api/forum/log')
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) return;
 
-                forumLogLineCount = logLines.length;
+                    const chatArea = document.getElementById('forumChatArea');
+                    if (chatArea) {
+                        chatArea.innerHTML = '';
+                    }
+
+                    const parsedMessages = data.parsed_messages || [];
+                    if (parsedMessages.length > 0) {
+                        parsedMessages.forEach(message => addForumMessage(message));
+                    }
+
+                    forumLogLineCount = data.log_lines ? data.log_lines.length : 0;
+                });
             })
             .catch(error => {
-                console.error('加载论坛日志失败:', error);
+                console.error('加载论坛历史日志失败:', error);
                 // 【优化】显示错误提示
                 if (currentApp === 'forum') {
                     const renderer = logRenderers['forum'];
                     if (renderer) {
-                        renderer.clear('[错误] 加载Forum日志失败: ' + error.message);
+                        renderer.clear('[错误] 加载Forum历史日志失败: ' + error.message);
                         renderer.render();
                     }
                 }
