@@ -4208,6 +4208,7 @@
         let reportTaskId = null;
         let reportPollingInterval = null;
         let reportEventSource = null;
+        let reportLogRefreshInterval = null; // 日志刷新定时器
         let reportAutoPreviewLoaded = false;
         let reportStreamReconnectTimer = null;
         let reportStreamRetryDelay = 3000;
@@ -4920,6 +4921,14 @@
                 updateReportStreamStatus('connected');
                 appendReportStreamLine(isRetry ? 'SSE重连成功' : 'Report Engine流式连接已建立', 'success', { badge: 'SSE' });
                 startStreamHeartbeat();
+
+                // 启动日志刷新定时器，每1秒刷新一次日志
+                if (reportLogRefreshInterval) {
+                    clearInterval(reportLogRefreshInterval);
+                }
+                reportLogRefreshInterval = setInterval(() => {
+                    refreshReportLog();
+                }, 1000); // 每1秒刷新一次
             };
             reportEventSource.onerror = () => {
                 appendReportStreamLine('检测到网络抖动，SSE正在等待自动重连...', 'warn', { badge: 'SSE' });
@@ -4945,6 +4954,11 @@
             if (reportStreamReconnectTimer) {
                 clearTimeout(reportStreamReconnectTimer);
                 reportStreamReconnectTimer = null;
+            }
+            // 清除日志刷新定时器
+            if (reportLogRefreshInterval) {
+                clearInterval(reportLogRefreshInterval);
+                reportLogRefreshInterval = null;
             }
             clearStreamHeartbeat();
             if (!keepIndicator) {
