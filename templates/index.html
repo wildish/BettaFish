@@ -317,26 +317,35 @@
         /* 控制台输出 */
         .console-output {
             flex: 1;
-            padding: 15px;
             background-color: #000000;
             color: #00ff00;
             font-family: 'Courier New', monospace;
             font-size: 12px;
-            overflow-y: auto;
-            overflow-x: hidden;
+            overflow: hidden;        /* 【图层优化】容器本身不滚动，由console-layer滚动 */
             white-space: pre-wrap;
             word-break: break-all;
             min-height: 0; /* 允许内容缩小 */
+            position: relative; /* 【图层优化】作为定位上下文，让console-layer相对于此容器定位 */
         }
 
         .console-layer {
-            display: none;
+            visibility: hidden;      /* 使用visibility替代display，避免重排 */
+            position: absolute;      /* 相对于.console-output绝对定位 */
+            top: 0;
+            left: 0;
             width: 100%;
-            min-height: 100%;
+            height: 100%;            /* 填满整个黑色框 */
+            padding: 15px;           /* 图层内边距 */
+            overflow-y: auto;        /* 允许独立滚动 */
+            overflow-x: hidden;
+            pointer-events: none;    /* 隐藏层不响应交互 */
+            box-sizing: border-box;  /* 包含padding在width/height内 */
         }
 
         .console-layer.active {
-            display: block;
+            visibility: visible;     /* 显示活动层 */
+            pointer-events: auto;    /* 活动层响应交互 */
+            z-index: 1;             /* 置顶显示 */
         }
 
         .console-line {
@@ -1363,7 +1372,8 @@
         class LogVirtualList {
             constructor(container) {
                 this.container = container;
-                this.scrollElement = document.getElementById('consoleOutput') || container;
+                // 【图层优化】scrollElement 就是 container（.console-layer），因为每个图层独立滚动
+                this.scrollElement = container;
                 this.lines = [];
                 this.pending = [];
                 this.pool = [];
@@ -1399,6 +1409,10 @@
                 this.pendingHighWaterMark = 0; // pending队列最大值，用于调试
                 this.renderTime = 0; // 渲染耗时
                 this.lastRenderLineCount = 0; // 上次渲染的行数
+
+                // 【图层优化】窗口激活状态管理
+                this.isActive = false;     // 当前窗口是否为活动窗口
+                this.needsRender = false;  // 非活动窗口是否有待渲染内容
 
                 this.attachScroll();
             }
@@ -1585,6 +1599,24 @@
                 if (px > 0) this.lineHeight = px;
             }
 
+            /**
+             * 【图层优化】设置窗口激活状态
+             * @param {boolean} active - 是否为活动窗口
+             */
+            setActive(active) {
+                this.isActive = active;
+                if (active && this.needsRender) {
+                    // 窗口激活时，如果有待渲染内容，异步渲染
+                    requestIdleCallback(() => {
+                        if (this.pending.length > 0) {
+                            this.flush();
+                        }
+                        this.scheduleRender(true);
+                        this.needsRender = false;
+                    }, { timeout: 50 });
+                }
+            }
+
             append(text, className = 'console-line') {
                 // 在添加内容前检查是否在底部，如果是则标记需要滚动
                 if (this.autoScrollEnabled && this.isNearBottom()) {
@@ -1598,7 +1630,18 @@
                     this.pendingHighWaterMark = this.pending.length;
                 }
 
-                // 【优化】智能批处理策略
+                // 【图层优化】非活动窗口处理策略
+                if (!this.isActive) {
+                    // 非活动窗口：只累积数据，不触发渲染
+                    // 设置队列上限，防止内存溢出
+                    if (this.pending.length >= 1000) {
+                        this.flush();  // 定期flush避免内存溢出
+                        this.needsRender = true;  // 标记需要渲染
+                    }
+                    return;  // 跳过后续渲染逻辑
+                }
+
+                // 【优化】活动窗口：智能批处理策略
                 const now = Date.now();
                 const timeSinceLastFlush = now - this.lastFlushTime;
 
@@ -1690,6 +1733,16 @@
             scheduleRender(force = false) {
                 if (!this.container) return;
                 if (!force && this.rafId) return;
+
+                // 【图层优化】检查窗口是否可见
+                if (!force && !this.isActive) {
+                    // 非活动窗口：只flush数据，不渲染DOM
+                    if (this.pending.length > 0) {
+                        this.flush();  // 保存数据到lines
+                        this.needsRender = true;  // 标记需要渲染
+                    }
+                    return;  // 跳过DOM操作
+                }
 
                 // 取消之前的请求
                 if (this.rafId) {
@@ -2698,17 +2751,16 @@
             // 更新当前应用
             currentApp = app;
 
-            // 切换控制台层（不添加系统提示，避免频繁输出）
+            // 【图层优化】切换控制台层（纯CSS图层切换，瞬间完成）
             setActiveConsoleLayer(app);
 
             // 更新嵌入页面（右侧内容区域）
             updateEmbeddedPage(app);
 
-            // 加载对应的控制台输出（只在必要时加载）
-            if (app === 'forum') {
-                loadForumLog();
-            } else if (app === 'report') {
-                loadReportLog();
+            // 【图层优化】移除重复加载逻辑
+            // 日志数据已通过Socket.IO/SSE实时同步，无需重新加载
+            // 仅保留特殊页面的初始化逻辑
+            if (app === 'report') {
                 // 只在报告界面未初始化时才重新加载
                 const reportContent = document.getElementById('reportContent');
                 if (!reportContent || reportContent.children.length === 0) {
@@ -2718,8 +2770,6 @@
                 setTimeout(() => {
                     checkReportLockStatus();
                 }, 500);
-            } else {
-                loadConsoleOutput(app);
             }
         }
 
@@ -2806,15 +2856,18 @@
                 layer.dataset.app = app;
                 if (app === currentApp) {
                     layer.classList.add('active');
-                    layer.style.display = 'block';
                     activeConsoleLayer = app;
-                } else {
-                    layer.style.display = 'none';
                 }
+                // 【图层优化】不再设置style.display，完全由CSS类控制
 
                 container.appendChild(layer);
                 consoleLayers[app] = layer;
                 logRenderers[app] = new LogVirtualList(layer);
+
+                // 【图层优化】标记活动窗口
+                if (app === currentApp) {
+                    logRenderers[app].isActive = true;
+                }
 
                 // 【FIX Bug #3】初始提示立即渲染，避免黑屏
                 logRenderers[app].clear(`[系统] ${appNames[app] || app} 日志就绪`);
@@ -2835,7 +2888,7 @@
             const layer = document.createElement('div');
             layer.className = 'console-layer';
             layer.dataset.app = app;
-            layer.style.display = app === currentApp ? 'block' : 'none';
+            // 【图层优化】不再设置style.display，完全由CSS类控制
             if (app === currentApp) {
                 layer.classList.add('active');
                 activeConsoleLayer = app;
@@ -2844,6 +2897,12 @@
             container.appendChild(layer);
             consoleLayers[app] = layer;
             logRenderers[app] = new LogVirtualList(layer);
+
+            // 【图层优化】标记活动窗口
+            if (app === currentApp) {
+                logRenderers[app].isActive = true;
+            }
+
             return layer;
         }
 
@@ -2852,43 +2911,36 @@
             if (!container) return;
 
             // 如果已经是当前激活的层，跳过
-            if (activeConsoleLayer === app && consoleLayers[app] && consoleLayers[app].style.display === 'block') {
+            if (activeConsoleLayer === app && consoleLayers[app] && consoleLayers[app].classList.contains('active')) {
                 return;
             }
 
-            // 隐藏旧的激活层
+            // 【图层优化】标记旧窗口为非活动
             if (activeConsoleLayer && consoleLayers[activeConsoleLayer]) {
                 consoleLayers[activeConsoleLayer].classList.remove('active');
-                consoleLayers[activeConsoleLayer].style.display = 'none';
+                if (logRenderers[activeConsoleLayer]) {
+                    logRenderers[activeConsoleLayer].setActive(false);
+                }
             }
 
             // 获取或创建目标层
             const targetLayer = getConsoleLayer(app);
             if (!targetLayer) return;
 
-            // 显示新的激活层
-            targetLayer.style.display = 'block';
+            // 【图层优化】显示新的激活层（纯CSS类切换，不修改style.display）
             targetLayer.classList.add('active');
             activeConsoleLayer = app;
 
-            // 触发一次渲染以确保内容正确显示
+            // 【图层优化】标记新窗口为活动，触发异步渲染
             const renderer = logRenderers[app];
             if (renderer) {
-                // 【FIX Bug #1/#3】如果已有数据，立即同步渲染，避免黑屏
-                if (renderer.lines.length > 0 || renderer.pending.length > 0) {
-                    renderer.flush(); // 先将pending数据合并到lines
-                    renderer.render(); // 立即同步渲染，不使用异步
-                } else {
-                    // 如果没有数据，显示加载提示（同步）
-                    renderer.clear(`[系统] 正在加载 ${appNames[app] || app} 日志...`);
-                    renderer.render(); // 立即渲染加载提示
-                }
+                renderer.setActive(true);  // 会在内部异步渲染待处理内容
+
                 // 确保滚动到底部
                 if (renderer.autoScrollEnabled) {
-                    // 使用setTimeout确保DOM更新后再滚动
-                    setTimeout(() => {
+                    requestAnimationFrame(() => {
                         renderer.scrollToBottom();
-                    }, 0);
+                    });
                 }
             }
         }
