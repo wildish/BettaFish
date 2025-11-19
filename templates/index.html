@@ -1234,7 +1234,6 @@
         let backendReachable = false;
         const consoleLayerApps = ['insight', 'media', 'query', 'forum', 'report'];
         const consoleLayers = {};
-        const consoleLayerScrollPositions = {};
         let activeConsoleLayer = currentApp;
         const logRenderers = {};
 
@@ -1367,12 +1366,16 @@
                 this.autoScrollEnabled = true;
                 this.resumeDelay = 3000; // 手动滚动后重新自动滚动的延迟（降低到3秒）
                 this.resumeTimer = null;
+                this.flushTimer = null; // 批处理定时器
                 this.lastRenderHash = null; // 用于检测内容是否真正变化
                 this.scrollLocked = false; // 防止滚动冲突的锁
                 this.needsScroll = false; // 标记是否需要滚动
                 this.lastScrollTime = 0; // 上次滚动时间，用于节流
                 this.scrollThrottle = 100; // 滚动节流时间（毫秒）
                 this.scrollHandler = null; // 存储滚动处理器引用
+                // 预创建占位符，避免每次渲染都创建
+                this.beforeSpacer = null;
+                this.afterSpacer = null;
                 this.attachScroll();
             }
 
@@ -1386,7 +1389,7 @@
                     if (scrollTimer) clearTimeout(scrollTimer);
                     scrollTimer = setTimeout(() => {
                         this.handleUserScroll();
-                    }, 150); // 增加防抖时间到150ms
+                    }, 100); // 减少防抖时间到100ms，提高响应速度
                 };
 
                 this.scrollElement.addEventListener('scroll', this.scrollHandler, { passive: true });
@@ -1400,6 +1403,10 @@
                     this.rafId = null;
                 }
                 this.clearResumeTimer();
+                if (this.flushTimer) {
+                    clearTimeout(this.flushTimer);
+                    this.flushTimer = null;
+                }
 
                 // 移除事件监听器
                 if (this.scrollElement && this.scrollHandler) {
@@ -1418,6 +1425,10 @@
                     }
                 });
                 this.pool = [];
+
+                // 清理占位符
+                this.beforeSpacer = null;
+                this.afterSpacer = null;
 
                 // 清空容器
                 if (this.container) {
@@ -1494,11 +1505,11 @@
                         });
                     }
 
-                    // 延迟解锁，避免立即触发 scroll 事件导致循环
+                    // 缩短锁释放延迟，从150ms减少到50ms，提高响应速度
                     setTimeout(() => {
                         this.scrollLocked = false;
                         this.needsScroll = false; // 滚动完成后重置标志
-                    }, 150);
+                    }, 50);
                 });
             }
 
@@ -1513,9 +1524,18 @@
                 }
 
                 this.pending.push({ text, className });
-                // 增加批处理阈值到 100，减少渲染频率
-                if (this.pending.length > 100) {
+                // 优化批处理策略：超过50行或等待时间超过200ms后flush
+                if (this.pending.length >= 50) {
                     this.flush();
+                } else if (this.pending.length === 1) {
+                    // 第一条消息时，设置一个定时器在200ms后自动flush
+                    if (this.flushTimer) {
+                        clearTimeout(this.flushTimer);
+                    }
+                    this.flushTimer = setTimeout(() => {
+                        this.flush();
+                        this.scheduleRender();
+                    }, 200);
                 }
                 this.maybeTrim();
                 this.scheduleRender();
@@ -1535,6 +1555,11 @@
 
             flush() {
                 if (!this.pending.length) return;
+                // 清理批处理定时器
+                if (this.flushTimer) {
+                    clearTimeout(this.flushTimer);
+                    this.flushTimer = null;
+                }
                 this.lines.push(...this.pending);
                 this.pending = [];
                 this.maybeTrim();
@@ -1572,12 +1597,18 @@
                         this.container.innerHTML = '';
                         // 清空时也清理pool
                         this.pool = [];
+                        this.beforeSpacer = null;
+                        this.afterSpacer = null;
                     }
                     return;
                 }
 
-                // 计算内容哈希，只在内容真正变化时才更新 DOM
-                const contentHash = `${total}-${this.lines[total - 1].text}`;
+                // 改进内容哈希：包含总行数、前5行和后5行的摘要
+                const hashSample = total <= 10
+                    ? this.lines.map(l => l.text).join('|')
+                    : this.lines.slice(0, 5).map(l => l.text).join('|') + '|' +
+                      this.lines.slice(-5).map(l => l.text).join('|');
+                const contentHash = `${total}-${hashSample}`;
                 if (this.lastRenderHash === contentHash) {
                     // 内容没有变化，只需要处理滚动（如果需要的话）
                     if (this.needsScroll && this.autoScrollEnabled) {
@@ -1619,24 +1650,28 @@
                     this.pool.push(node);
                 }
 
+                // 复用或创建占位符（避免每次重建）
+                if (!this.beforeSpacer) {
+                    this.beforeSpacer = document.createElement('div');
+                    this.beforeSpacer.dataset.spacer = 'before';
+                } else if (!this.beforeSpacer.parentNode) {
+                    // 如果占位符被意外移除，标记需要重建DOM
+                    this.beforeSpacer = document.createElement('div');
+                    this.beforeSpacer.dataset.spacer = 'before';
+                }
+                this.beforeSpacer.style.height = `${beforeHeight}px`;
+
+                if (!this.afterSpacer) {
+                    this.afterSpacer = document.createElement('div');
+                    this.afterSpacer.dataset.spacer = 'after';
+                } else if (!this.afterSpacer.parentNode) {
+                    this.afterSpacer = document.createElement('div');
+                    this.afterSpacer.dataset.spacer = 'after';
+                }
+                this.afterSpacer.style.height = `${afterHeight}px`;
+
                 // 使用DocumentFragment来减少DOM重绘
                 const fragment = document.createDocumentFragment();
-
-                // 更新或创建前置占位符
-                let beforeSpacer = this.container.querySelector('[data-spacer="before"]');
-                if (!beforeSpacer) {
-                    beforeSpacer = document.createElement('div');
-                    beforeSpacer.dataset.spacer = 'before';
-                }
-                beforeSpacer.style.height = `${beforeHeight}px`;
-
-                // 更新或创建后置占位符
-                let afterSpacer = this.container.querySelector('[data-spacer="after"]');
-                if (!afterSpacer) {
-                    afterSpacer = document.createElement('div');
-                    afterSpacer.dataset.spacer = 'after';
-                }
-                afterSpacer.style.height = `${afterHeight}px`;
 
                 // 只更新可见区域的节点
                 for (let idx = start; idx < end; idx++) {
@@ -1653,11 +1688,26 @@
                     fragment.appendChild(node);
                 }
 
-                // 一次性更新 DOM
-                this.container.innerHTML = '';
-                this.container.appendChild(beforeSpacer);
-                this.container.appendChild(fragment);
-                this.container.appendChild(afterSpacer);
+                // 优化DOM更新：只在必要时清空容器
+                // 检查容器是否需要重建（比如占位符丢失）
+                const needsRebuild = !this.beforeSpacer.parentNode || !this.afterSpacer.parentNode;
+                if (needsRebuild) {
+                    this.container.innerHTML = '';
+                    this.container.appendChild(this.beforeSpacer);
+                    this.container.appendChild(fragment);
+                    this.container.appendChild(this.afterSpacer);
+                } else {
+                    // 增量更新：只更新可见节点部分
+                    // 移除旧的可见节点
+                    const existingNodes = Array.from(this.container.querySelectorAll('.console-line'));
+                    existingNodes.forEach(node => {
+                        if (node.parentNode === this.container) {
+                            this.container.removeChild(node);
+                        }
+                    });
+                    // 在占位符之间插入新节点
+                    this.container.insertBefore(fragment, this.afterSpacer);
+                }
 
                 // 只在有标记且自动滚动启用时才滚动到底部
                 if (this.needsScroll && this.autoScrollEnabled) {
@@ -2483,7 +2533,7 @@
             // 检查Report Engine是否被锁定
             if (app === 'report') {
                 const reportButton = document.querySelector(`[data-app="report"]`);
-                if (reportButton.classList.contains('locked')) {
+                if (reportButton && reportButton.classList.contains('locked')) {
                     showMessage('需等待其余三个Agent工作完毕', 'error');
                     return;
                 }
@@ -2493,62 +2543,37 @@
             document.querySelectorAll('.app-button').forEach(btn => {
                 btn.classList.remove('active');
             });
-            document.querySelector(`[data-app="${app}"]`).classList.add('active');
+            const targetButton = document.querySelector(`[data-app="${app}"]`);
+            if (targetButton) {
+                targetButton.classList.add('active');
+            }
 
+            // 更新当前应用
             currentApp = app;
+
+            // 切换控制台层（不添加系统提示，避免频繁输出）
             setActiveConsoleLayer(app);
 
-            // 根据应用类型处理不同的显示逻辑
+            // 更新嵌入页面（右侧内容区域）
+            updateEmbeddedPage(app);
+
+            // 加载对应的控制台输出（只在必要时加载）
             if (app === 'forum') {
-                // 切换到论坛模式
-                document.getElementById('embeddedHeader').textContent = 'Forum Engine - 多智能体交流';
-
-                // 显示论坛容器，隐藏其他内容
-                document.getElementById('forumContainer').classList.add('active');
-                document.getElementById('reportContainer').classList.remove('active');
-
-                // 追加提示并加载forum日志
-                appendConsoleTextLine('forum', '[系统] 切换到论坛模式');
                 loadForumLog();
-
             } else if (app === 'report') {
-                // 切换到报告模式
-                document.getElementById('embeddedHeader').textContent = 'Report Agent - 最终报告生成';
-
-                // 显示报告容器，隐藏其他内容
-                document.getElementById('reportContainer').classList.add('active');
-                document.getElementById('forumContainer').classList.remove('active');
-
-                // 追加提示并加载report日志
-                appendConsoleTextLine('report', '[系统] 切换到报告生成模式');
                 loadReportLog();
-
                 // 只在报告界面未初始化时才重新加载
                 const reportContent = document.getElementById('reportContent');
                 if (!reportContent || reportContent.children.length === 0) {
                     loadReportInterface();
                 }
-
                 // 切换到report页面时检查是否可以自动生成报告
                 setTimeout(() => {
                     checkReportLockStatus();
                 }, 500);
-
             } else {
-                // 切换到普通Engine模式
-                document.getElementById('embeddedHeader').textContent = agentTitles[app] || appNames[app];
-
-                // 隐藏论坛和报告容器
-                document.getElementById('forumContainer').classList.remove('active');
-                document.getElementById('reportContainer').classList.remove('active');
-
-                // 追加提示并加载新的控制台输出
-                appendConsoleTextLine(app, '[系统] 切换到 ' + appNames[app]);
                 loadConsoleOutput(app);
             }
-
-            // 更新嵌入页面
-            updateEmbeddedPage(app);
         }
 
         // 存储最后显示的行数，避免重复加载
@@ -2575,15 +2600,15 @@
                     layer.style.display = 'none';
                 }
 
-                logRenderers[app] = new LogVirtualList(layer);
                 container.appendChild(layer);
                 consoleLayers[app] = layer;
+                logRenderers[app] = new LogVirtualList(layer);
 
                 // 初始提示仅在渲染器内部渲染，不保留在 DOM
                 logRenderers[app].clear(`[系统] ${appNames[app] || app} 日志就绪`);
             });
 
-            container.scrollTop = container.scrollHeight;
+            // 不需要手动设置滚动位置，LogVirtualList会处理
         }
 
         function getConsoleLayer(app) {
@@ -2613,24 +2638,33 @@
             const container = getConsoleContainer();
             if (!container) return;
 
+            // 如果已经是当前激活的层，跳过
+            if (activeConsoleLayer === app && consoleLayers[app] && consoleLayers[app].style.display === 'block') {
+                return;
+            }
+
+            // 隐藏旧的激活层
             if (activeConsoleLayer && consoleLayers[activeConsoleLayer]) {
-                consoleLayerScrollPositions[activeConsoleLayer] = container.scrollTop;
                 consoleLayers[activeConsoleLayer].classList.remove('active');
                 consoleLayers[activeConsoleLayer].style.display = 'none';
             }
 
+            // 获取或创建目标层
             const targetLayer = getConsoleLayer(app);
             if (!targetLayer) return;
 
+            // 显示新的激活层
             targetLayer.style.display = 'block';
             targetLayer.classList.add('active');
             activeConsoleLayer = app;
 
-            const storedScroll = consoleLayerScrollPositions[app];
-            if (typeof storedScroll === 'number') {
-                container.scrollTop = storedScroll;
-            } else {
-                container.scrollTop = container.scrollHeight;
+            // 触发一次渲染以确保内容正确显示
+            const renderer = logRenderers[app];
+            if (renderer) {
+                // 使用 requestAnimationFrame 确保在下一帧渲染，避免闪烁
+                requestAnimationFrame(() => {
+                    renderer.scheduleRender(true);
+                });
             }
         }
 
@@ -2839,6 +2873,7 @@
         function updateEmbeddedPage(app) {
             const header = document.getElementById('embeddedHeader');
             const content = document.getElementById('embeddedContent');
+            if (!header || !content) return;
 
             // 如果是Forum Engine，直接显示论坛界面
             if (app === 'forum') {
@@ -2942,7 +2977,7 @@
                 }
 
                 placeholder.innerHTML = `
-                    <div style="margin-bottom: 10px;">${appNames[app]} 未运行</div>
+                    <div style="margin-bottom: 10px;">${appNames[app] || app} 未运行</div>
                     <div style="font-size: 12px;">状态: ${appStatus[app]}</div>
                 `;
 
