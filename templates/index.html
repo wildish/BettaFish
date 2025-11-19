@@ -4525,7 +4525,7 @@
                 scheduleReportStreamReconnect(taskId);
             };
 
-            const events = ['status', 'stage', 'chapter_status', 'chapter_chunk', 'warning', 'html_ready', 'completed', 'error', 'heartbeat'];
+            const events = ['status', 'stage', 'chapter_status', 'chapter_chunk', 'warning', 'error', 'debug', 'html_ready', 'completed', 'heartbeat'];
             events.forEach(evt => {
                 reportEventSource.addEventListener(evt, (event) => dispatchReportStreamEvent(evt, event));
             });
@@ -4630,7 +4630,10 @@
                     }
                     break;
                 case 'warning':
-                    appendReportStreamLine(payload.message || '检测到可重试的网络波动', 'warn');
+                    appendReportStreamLine(payload.message || '检测到可重试的网络波动', 'warn', { badge: 'WARNING' });
+                    break;
+                case 'debug':
+                    appendReportStreamLine(payload.message || 'Debug信息', 'info', { badge: 'DEBUG' });
                     break;
                 case 'html_ready':
                     appendReportStreamLine('HTML渲染完成，正在刷新预览...', 'success');
@@ -4664,18 +4667,29 @@
                     setGenerateButtonState(false);
                     break;
                 case 'error':
-                    appendReportStreamLine(payload.message || '任务失败', 'error');
+                    appendReportStreamLine(payload.message || '任务失败', 'error', { badge: 'ERROR' });
                     safeCloseReportStream();
                     updateReportStreamStatus('error');
                     reportTaskId = null;
                     setGenerateButtonState(false);
                     break;
                 case 'heartbeat':
+                    // 只有在非重连状态时才更新为connected并显示心跳消息
+                    // 避免在错误/重连期间显示误导性的"连接正常"消息
+                    const statusEl = document.getElementById('reportStreamStatus');
+                    const currentState = statusEl ? statusEl.dataset.state : null;
+
+                    // 如果当前处于重连或错误状态，忽略心跳消息
+                    if (currentState === 'reconnecting' || currentState === 'error') {
+                        break;
+                    }
+
                     updateReportStreamStatus('connected');
-                    appendReportStreamLine(payload.message || '流式连接正常，请稍候...', 'info', {
-                        badge: 'SSE',
-                        genericMessage: '流式连接正常，请耐心等待...'
-                    });
+                    // 心跳消息不显示在控制台，避免刷屏
+                    // appendReportStreamLine(payload.message || '流式连接正常，请稍候...', 'info', {
+                    //     badge: 'SSE',
+                    //     genericMessage: '流式连接正常，请耐心等待...'
+                    // });
                     break;
                 default:
                     if (payload.message) {
