@@ -4467,21 +4467,53 @@
         }
 
         function refreshReportLog() {
-            fetch('/api/report/log')
-            .then(response => response.json())
+            // 【修复】添加超时控制和完整错误处理
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
+
+            fetch('/api/report/log', { signal: controller.signal })
+            .then(response => {
+                clearTimeout(timeoutId);
+                // 【修复】检查HTTP状态
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                return response.json();
+            })
             .then(data => {
-                if (data.success && data.log_lines.length > reportLogLineCount) {
+                // 【修复】检查返回的成功状态
+                if (!data.success) {
+                    console.error('[Report日志] 刷新失败:', data.error || '未知错误');
+                    return;
+                }
+
+                if (data.log_lines && data.log_lines.length > reportLogLineCount) {
                     // 只添加新的行
                     const newLines = data.log_lines.slice(reportLogLineCount);
+
+                    // 【调试日志】记录实时读取的日志数量
+                    if (newLines.length > 0) {
+                        console.log(`[Report日志] 读取 ${newLines.length} 条新日志（总计 ${data.log_lines.length}）`);
+                    }
+
                     newLines.forEach(line => {
+                        // 直接添加，使用LogVirtualList的默认批处理机制
                         appendConsoleTextLine('report', line);
                     });
-                    
+
                     reportLogLineCount = data.log_lines.length;
                 }
             })
             .catch(error => {
-                console.error('刷新Report日志失败:', error);
+                clearTimeout(timeoutId);
+                // 【修复】区分错误类型
+                if (error.name === 'AbortError') {
+                    console.warn('[Report日志] 刷新超时（5秒）');
+                } else if (error.message.includes('Failed to fetch')) {
+                    console.error('[Report日志] 刷新失败: 网络连接错误');
+                } else {
+                    console.error('[Report日志] 刷新失败:', error.message || error);
+                }
             });
         }
 
@@ -5113,9 +5145,6 @@
                     reportTaskId = data.task_id;
                     showMessage('报告生成已启动', 'success');
 
-                    // 【修复】立即启动日志实时刷新，确保日志实时显示
-                    startReportLogRefresh();
-
                     // 更新任务状态显示
                     updateTaskProgressStatus({
                         task_id: data.task_id,
@@ -5126,12 +5155,13 @@
                         updated_at: new Date().toISOString()
                     });
 
-                    // 立即刷新一次日志以确保同步
-                    setTimeout(() => {
-                        refreshReportLog();
-                    }, 500);
-
                     appendReportStreamLine('任务创建成功，正在建立流式连接...', 'info', { force: true });
+
+                    // 【优化】先启动日志轮询，再建立SSE连接
+                    // 确保从任务开始就能读取日志
+                    startReportLogRefresh();
+                    console.log('[Report日志] 任务创建成功，启动日志轮询');
+
                     if (window.EventSource) {
                         openReportStream(reportTaskId);
                     } else {
@@ -5163,18 +5193,25 @@
 
         // 【修复】启动Report Engine日志实时刷新
         function startReportLogRefresh() {
-            // 清除旧的定时器
+            // 防重复：如果已经在运行，直接返回
             if (reportLogRefreshInterval) {
-                clearInterval(reportLogRefreshInterval);
-                reportLogRefreshInterval = null;
+                console.log('[Report日志] 日志轮询已在运行，跳过重复启动');
+                return;
             }
 
-            // 启动新的日志刷新定时器（1秒刷新一次，保证实时性）
+            // 立即刷新一次，获取当前所有日志
+            refreshReportLog();
+
+            // 启动定时器，每秒刷新一次
             reportLogRefreshInterval = setInterval(() => {
                 if (currentApp === 'report') {
                     refreshReportLog();
+                } else {
+                    // 如果切换到其他应用，自动停止轮询
+                    console.log('[Report日志] 检测到应用切换，停止日志轮询');
+                    stopReportLogRefresh();
                 }
-            }, 1000);  // 1秒刷新，确保日志实时显示
+            }, 1000);  // 每秒刷新一次
 
             console.log('[Report日志] 启动实时日志刷新，频率: 1秒');
         }
@@ -5421,9 +5458,10 @@
                 appendReportStreamLine(isRetry ? 'SSE重连成功' : 'Report Engine流式连接已建立', 'success', { badge: 'SSE' });
                 startStreamHeartbeat();
 
-                // 【优化Phase 1.1】删除定时刷新日志的轮询
-                // SSE事件流已提供实时推送，无需1秒轮询
-                // 这减少了大量不必要的HTTP请求
+                // 【修复】启动日志轮询，读取logger.info/debug/warning/error
+                // SSE只推送显式事件（stage/chapter_status等），logger日志需要轮询读取
+                startReportLogRefresh();
+                console.log('[Report日志] SSE连接建立，同步启动日志轮询');
             };
             reportEventSource.onerror = () => {
                 appendReportStreamLine('检测到网络抖动，SSE正在等待自动重连...', 'warn', { badge: 'SSE' });
@@ -5454,6 +5492,7 @@
             if (reportLogRefreshInterval) {
                 clearInterval(reportLogRefreshInterval);
                 reportLogRefreshInterval = null;
+                console.log('[Report日志] SSE连接关闭，停止日志轮询');
             }
             clearStreamHeartbeat();
             if (!keepIndicator) {
@@ -5560,7 +5599,15 @@
                     break;
                 case 'completed':
                     appendReportStreamLine(payload.message || '任务完成', 'success');
-                    safeCloseReportStream();
+
+                    // 【修复】任务完成前最后一次刷新日志，确保所有日志都被读取
+                    refreshReportLog();
+
+                    // 延迟500ms后关闭SSE，确保最后一次日志刷新完成
+                    setTimeout(() => {
+                        safeCloseReportStream();
+                    }, 500);
+
                     reportTaskId = null;
                     setGenerateButtonState(false);
                     if (task) {
