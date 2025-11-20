@@ -1392,7 +1392,10 @@
                         refreshForumLog();
                     }
                     if (currentApp === 'report') {
-                        refreshReportLog();
+                        // 使用新的日志管理器刷新
+                        if (reportLogManager && reportLogManager.isRunning) {
+                            reportLogManager.refresh();
+                        }
                     }
                 }, 100);
             } else {
@@ -3536,7 +3539,7 @@
             // 仅保留特殊页面的初始化逻辑
             if (app === 'report') {
                 // 【修复】切换到Report Engine时启动日志刷新
-                startReportLogRefresh();
+                reportLogManager.start();
 
                 // 只在报告界面未初始化时才重新加载
                 const reportContent = document.getElementById('reportContent');
@@ -3549,7 +3552,7 @@
                 }, 500);
             } else {
                 // 【修复】切换离开Report Engine时停止日志刷新，节省资源
-                stopReportLogRefresh();
+                reportLogManager.stop();
             }
         }
 
@@ -3822,9 +3825,12 @@
                 refreshForumLog();
                 return;
             }
-            
+
             if (currentApp === 'report') {
-                refreshReportLog();
+                // 使用新的日志管理器刷新
+                if (reportLogManager && reportLogManager.isRunning) {
+                    reportLogManager.refresh();
+                }
                 return;
             }
             
@@ -4246,6 +4252,325 @@
         let reportLockCheckInterval = null;
         let lastCompletedReportTask = null;
 
+        // ====== Report Engine 日志管理器 ======
+        class ReportLogManager {
+            constructor() {
+                this.intervalId = null;
+                this.lineCount = 0;
+                this.isRunning = false;
+                this.refreshInterval = 250; // 250ms轮询一次，更加实时
+                this.lastError = null;
+                this.retryCount = 0;
+                this.maxRetries = 3;
+            }
+
+            // 启动日志轮询
+            start() {
+                if (this.isRunning) {
+                    console.log('[ReportLogManager] 已在运行，跳过重复启动');
+                    return;
+                }
+
+                console.log('[ReportLogManager] ===== 启动日志轮询系统 =====');
+                this.isRunning = true;
+                this.retryCount = 0;
+
+                // 立即执行一次
+                console.log('[ReportLogManager] 执行初始刷新...');
+                this.refresh();
+
+                // 启动定时轮询
+                this.intervalId = setInterval(() => {
+                    if (currentApp === 'report' && this.isRunning) {
+                        console.log('[ReportLogManager] 定时器触发，执行刷新...');
+                        this.refresh();
+                    }
+                }, this.refreshInterval);
+
+                console.log(`[ReportLogManager] 轮询已启动，频率: ${this.refreshInterval}ms, intervalId: ${this.intervalId}`);
+            }
+
+            // 停止日志轮询
+            stop() {
+                if (!this.isRunning) {
+                    console.log('[ReportLogManager] 未在运行，无需停止');
+                    return;
+                }
+
+                console.log('[ReportLogManager] ===== 停止日志轮询系统 =====');
+                this.isRunning = false;
+
+                if (this.intervalId) {
+                    clearInterval(this.intervalId);
+                    this.intervalId = null;
+                }
+
+                console.log('[ReportLogManager] 轮询已停止');
+            }
+
+            // 重置计数器（任务开始时调用）
+            reset() {
+                console.log(`[ReportLogManager] 重置计数器，原值: ${this.lineCount}`);
+                this.lineCount = 0;
+                this.lastError = null;
+                this.retryCount = 0;
+            }
+
+            // 刷新日志
+            refresh() {
+                if (!this.isRunning) {
+                    console.log('[ReportLogManager.refresh] 管理器未运行，跳过刷新');
+                    return;
+                }
+
+                console.log('[ReportLogManager.refresh] 开始刷新日志...');
+
+                // 【修复】使用传统的Promise方式，避免async/await兼容性问题
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+                fetch('/api/report/log', {
+                    method: 'GET',
+                    headers: { 'Cache-Control': 'no-cache' },
+                    signal: controller.signal
+                })
+                .then(response => {
+                    clearTimeout(timeoutId);
+                    console.log(`[ReportLogManager.refresh] 收到响应，状态: ${response.status}`);
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('[ReportLogManager.refresh] 解析JSON成功');
+
+                    if (!data.success) {
+                        throw new Error(data.error || '未知错误');
+                    }
+
+                    // 成功后重置重试计数
+                    this.retryCount = 0;
+
+                    // 【调试】输出获取到的日志行数
+                    if (data.log_lines) {
+                        console.log(`[ReportLogManager.refresh] API返回 ${data.log_lines.length} 行日志`);
+                    } else {
+                        console.log('[ReportLogManager.refresh] API返回的log_lines为空');
+                    }
+
+                    // 处理日志数据
+                    this.processLogs(data.log_lines || []);
+                })
+                .catch(error => {
+                    clearTimeout(timeoutId);
+                    console.error('[ReportLogManager.refresh] 错误:', error);
+                    this.handleError(error);
+                });
+            }
+
+            // 处理日志数据
+            processLogs(logLines) {
+                const totalLines = logLines.length;
+
+                console.log(`[ReportLogManager.processLogs] 总行数: ${totalLines}, 当前计数: ${this.lineCount}`);
+
+                // 如果有新日志
+                if (totalLines > this.lineCount) {
+                    const newLines = logLines.slice(this.lineCount);
+                    console.log(`[ReportLogManager] 发现 ${newLines.length} 条新日志 (${this.lineCount} -> ${totalLines})`);
+
+                    // 输出前3行新日志用于调试
+                    if (newLines.length > 0) {
+                        console.log('[ReportLogManager] 新日志样本:');
+                        newLines.slice(0, 3).forEach((line, idx) => {
+                            console.log(`  [${idx}] ${line.substring(0, 100)}...`);
+                        });
+                    }
+
+                    // 逐行处理并显示
+                    newLines.forEach((line, index) => {
+                        console.log(`[ReportLogManager.processLogs] 处理第 ${index + 1}/${newLines.length} 行`);
+                        this.displayLogLine(line);
+                    });
+
+                    // 更新计数器
+                    this.lineCount = totalLines;
+                    console.log(`[ReportLogManager] 计数器更新为: ${this.lineCount}`);
+                } else {
+                    console.log(`[ReportLogManager] 没有新日志 (总数: ${totalLines}, 已读: ${this.lineCount})`);
+                }
+            }
+
+            // 显示单行日志（带格式化）
+            displayLogLine(line) {
+                // 解析loguru格式的日志
+                const logPattern = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s*\|\s*(INFO|DEBUG|WARNING|ERROR|CRITICAL)\s*\|\s*(.+?)\s*-\s*(.*)$/;
+                const match = line.match(logPattern);
+
+                if (match) {
+                    const [, timestamp, level, location, message] = match;
+
+                    // 【调试】输出匹配到的日志级别
+                    if (level === 'WARNING' || level === 'ERROR' || level === 'DEBUG') {
+                        console.log(`[ReportLogManager] 检测到 ${level} 日志: ${message.substring(0, 50)}...`);
+                    }
+
+                    // 格式化输出 - 简化时间戳，只显示时间部分
+                    const timeOnly = timestamp.split(' ')[1];
+                    const formattedLine = `[${timeOnly}] [${level}] ${message}`;
+
+                    // 添加到控制台（带样式提示）
+                    if (level === 'ERROR' || level === 'CRITICAL') {
+                        appendConsoleTextLine('report', formattedLine, 'error');
+                    } else if (level === 'WARNING') {
+                        appendConsoleTextLine('report', formattedLine, 'warning');
+                    } else if (level === 'DEBUG') {
+                        appendConsoleTextLine('report', formattedLine, 'debug');
+                    } else {
+                        appendConsoleTextLine('report', formattedLine);
+                    }
+
+                    // 同时在浏览器控制台输出（便于调试）- 降低输出频率
+                    if (level === 'ERROR' || level === 'CRITICAL') {
+                        console.error(`[ReportLog] ${formattedLine}`);
+                    } else if (level === 'WARNING') {
+                        console.warn(`[ReportLog] ${formattedLine}`);
+                    } else if (level === 'DEBUG') {
+                        console.debug(`[ReportLog] ${formattedLine}`);
+                    }
+                } else {
+                    // 非标准格式的日志，直接显示
+                    // 【调试】输出未匹配的行，帮助调试正则
+                    if (line.includes('WARNING') || line.includes('ERROR') || line.includes('DEBUG')) {
+                        console.log(`[ReportLogManager] 未匹配的日志行: "${line}"`);
+                    }
+                    appendConsoleTextLine('report', line);
+                }
+            }
+
+            // 处理错误
+            handleError(error) {
+                // 避免重复错误日志
+                const errorMsg = error.message || error.toString();
+                if (errorMsg === this.lastError) {
+                    return; // 相同错误不重复输出
+                }
+
+                this.lastError = errorMsg;
+                this.retryCount++;
+
+                // 只在前几次重试时输出错误
+                if (this.retryCount <= this.maxRetries) {
+                    console.warn(`[ReportLogManager] 获取日志失败 (${this.retryCount}/${this.maxRetries}): ${errorMsg}`);
+                }
+
+                // 超过最大重试次数时暂停一段时间
+                if (this.retryCount > this.maxRetries) {
+                    this.stop();
+                    console.error('[ReportLogManager] 多次失败，暂停轮询');
+
+                    // 5秒后自动重试
+                    setTimeout(() => {
+                        if (currentApp === 'report') {
+                            console.log('[ReportLogManager] 尝试恢复轮询...');
+                            this.start();
+                        }
+                    }, 5000);
+                }
+            }
+
+            // 获取状态信息
+            getStatus() {
+                return {
+                    isRunning: this.isRunning,
+                    lineCount: this.lineCount,
+                    intervalId: this.intervalId,
+                    lastError: this.lastError,
+                    retryCount: this.retryCount
+                };
+            }
+        }
+
+        // 创建全局日志管理器实例
+        const reportLogManager = new ReportLogManager();
+
+        // 【调试】测试日志管理器
+        window.testReportLogManager = function() {
+            console.log('[测试] ===== 开始测试Report日志管理器 =====');
+
+            // 检查当前状态
+            const status = reportLogManager.getStatus();
+            console.log('[测试] 当前状态:', status);
+
+            // 如果未运行，启动它
+            if (!status.isRunning) {
+                console.log('[测试] 启动日志管理器...');
+                reportLogManager.start();
+            }
+
+            // 手动刷新一次
+            console.log('[测试] 手动触发刷新...');
+            reportLogManager.refresh();
+
+            // 模拟添加日志
+            console.log('[测试] 模拟添加WARNING日志...');
+            appendConsoleTextLine('report', '[21:02:43.014] [WARNING] 测试警告消息', 'warning');
+
+            console.log('[测试] 模拟添加ERROR日志...');
+            appendConsoleTextLine('report', '[21:02:43.018] [ERROR] 测试错误消息', 'error');
+
+            console.log('[测试] ===== 测试完成 =====');
+        };
+
+        // 【调试】直接测试API
+        window.testReportAPI = function() {
+            console.log('[测试API] ===== 开始测试Report API =====');
+
+            fetch('/api/report/log', {
+                method: 'GET',
+                headers: { 'Cache-Control': 'no-cache' }
+            })
+            .then(response => {
+                console.log('[测试API] 响应状态:', response.status);
+                return response.json();
+            })
+            .then(data => {
+                console.log('[测试API] 返回数据:', data);
+                if (data.success && data.log_lines) {
+                    console.log('[测试API] 日志行数:', data.log_lines.length);
+                    console.log('[测试API] 前5行日志:');
+                    data.log_lines.slice(0, 5).forEach((line, idx) => {
+                        console.log(`  ${idx}: ${line}`);
+                    });
+
+                    // 查找WARNING和ERROR日志
+                    const warnings = data.log_lines.filter(line => line.includes('WARNING'));
+                    const errors = data.log_lines.filter(line => line.includes('ERROR'));
+
+                    console.log(`[测试API] 找到 ${warnings.length} 条WARNING日志`);
+                    console.log(`[测试API] 找到 ${errors.length} 条ERROR日志`);
+
+                    if (warnings.length > 0) {
+                        console.log('[测试API] WARNING日志示例:');
+                        warnings.slice(0, 3).forEach(line => console.log('  ', line));
+                    }
+
+                    if (errors.length > 0) {
+                        console.log('[测试API] ERROR日志示例:');
+                        errors.slice(0, 3).forEach(line => console.log('  ', line));
+                    }
+                }
+            })
+            .catch(error => {
+                console.error('[测试API] 错误:', error);
+            });
+
+            console.log('[测试API] ===== 测试完成 =====');
+        };
+
         // 实时刷新论坛消息（适用于所有页面）
         function refreshForumMessages() {
             fetch('/api/forum/log')
@@ -4466,119 +4791,30 @@
             });
         }
 
+        // 【重构】刷新Report日志（使用新的日志管理器）
         function refreshReportLog() {
-            // 【修复】添加超时控制和完整错误处理
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
-
-            fetch('/api/report/log', { signal: controller.signal })
-            .then(response => {
-                clearTimeout(timeoutId);
-                // 【修复】检查HTTP状态
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-                return response.json();
-            })
-            .then(data => {
-                // 【修复】检查返回的成功状态
-                if (!data.success) {
-                    console.error('[Report日志] 刷新失败:', data.error || '未知错误');
-                    return;
-                }
-
-                if (data.log_lines && data.log_lines.length > reportLogLineCount) {
-                    // 只添加新的行
-                    const newLines = data.log_lines.slice(reportLogLineCount);
-
-                    // 【调试日志】记录实时读取的日志数量
-                    if (newLines.length > 0) {
-                        console.log(`[Report日志] 读取 ${newLines.length} 条新日志（总计 ${data.log_lines.length}）`);
-                    }
-
-                    newLines.forEach(line => {
-                        // 直接添加，使用LogVirtualList的默认批处理机制
-                        appendConsoleTextLine('report', line);
-                    });
-
-                    reportLogLineCount = data.log_lines.length;
-                }
-            })
-            .catch(error => {
-                clearTimeout(timeoutId);
-                // 【修复】区分错误类型
-                if (error.name === 'AbortError') {
-                    console.warn('[Report日志] 刷新超时（5秒）');
-                } else if (error.message.includes('Failed to fetch')) {
-                    console.error('[Report日志] 刷新失败: 网络连接错误');
-                } else {
-                    console.error('[Report日志] 刷新失败:', error.message || error);
-                }
-            });
+            // 兼容旧代码：直接调用日志管理器的刷新
+            if (reportLogManager && reportLogManager.isRunning) {
+                reportLogManager.refresh();
+            } else {
+                console.log('[RefreshReportLog] 日志管理器未运行，跳过刷新');
+            }
         }
 
-        // 加载Report Engine日志
+        // 加载Report Engine日志（初始化时使用）
         function loadReportLog() {
-            fetch('/api/report/log')
-            .then(response => response.json())
-            .then(data => {
-                // 【FIX Bug #5】检查是否仍然在report页面
-                if (currentApp !== 'report') {
-                    console.log('忽略report日志响应（已切换到其他app）');
-                    return;
-                }
+            // 使用新的日志管理器
+            if (!reportLogManager.isRunning) {
+                // 清空控制台
+                clearConsoleLayer('report', '[系统] Report Engine 日志监控已启动');
 
-                if (data.success) {
-                    if (reportLogLineCount === 0) {
-                        clearConsoleLayer('report', '[系统] Report Engine 日志监控已启动');
-                        logRenderers['report'].render(); // 立即渲染
-                    }
-
-                    if (data.log_lines && data.log_lines.length > 0) {
-                        const newLines = data.log_lines.slice(reportLogLineCount);
-                        const linesToProcess = reportLogLineCount === 0 ? data.log_lines : newLines;
-
-                        linesToProcess.forEach(line => {
-                            appendConsoleTextLine('report', line);
-                        });
-
-                        // 重置计数器以确保后续消息能正确显示
-                        reportLogLineCount = data.log_lines.length;
-
-                        // 移除"正在加载"提示（如果存在）
-                        const renderer = logRenderers['report'];
-                        if (renderer && renderer.lines.length > 0) {
-                            const firstLine = renderer.lines[0];
-                            if (firstLine && firstLine.text.includes('正在加载')) {
-                                renderer.lines.shift();
-                                renderer.lastRenderHash = null;
-                                renderer.scheduleRender(true);
-                            }
-                        }
-                    } else {
-                        // 如果没有日志，重置计数器
-                        reportLogLineCount = 0;
-                    }
-                } else {
-                    // 【优化】加载失败显示错误
-                    const renderer = logRenderers['report'];
-                    if (renderer && currentApp === 'report') {
-                        renderer.clear('[错误] 加载Report日志失败');
-                        renderer.render();
-                    }
-                }
-            })
-            .catch(error => {
-                console.error('加载Report日志失败:', error);
-                // 【优化】显示错误提示
-                if (currentApp === 'report') {
-                    const renderer = logRenderers['report'];
-                    if (renderer) {
-                        renderer.clear('[错误] 加载Report日志失败: ' + error.message);
-                        renderer.render();
-                    }
-                }
-            });
+                // 重置计数器并启动
+                reportLogManager.reset();
+                reportLogManager.start();
+            } else {
+                // 如果已经在运行，只是刷新一次
+                reportLogManager.refresh();
+            }
         }
 
         // 解析论坛消息并添加到对话区
@@ -4739,7 +4975,7 @@
 
                     // 【修复】加载Report界面时启动日志刷新
                     if (currentApp === 'report') {
-                        startReportLogRefresh();
+                        reportLogManager.start();
                     }
                 } else {
                     reportContent.innerHTML = `
@@ -5110,9 +5346,10 @@
             }
 
             const query = document.getElementById('searchInput').value.trim() || '智能舆情分析报告';
-            
-            // 重置日志计数器，因为后台会清空日志文件
-            reportLogLineCount = 0;
+
+            // 【修复】先停止现有的日志轮询，避免与后端清空日志的竞态条件
+            reportLogManager.stop();
+
             reportAutoPreviewLoaded = false;
             safeCloseReportStream(true);
             
@@ -5157,10 +5394,14 @@
 
                     appendReportStreamLine('任务创建成功，正在建立流式连接...', 'info', { force: true });
 
-                    // 【优化】先启动日志轮询，再建立SSE连接
+                    // 【修复】在API成功后重置计数器，此时后端已清空日志文件
+                    // 避免在API调用期间旧interval读取旧日志导致的竞态条件
+                    reportLogManager.reset();
+
+                    // 【优化】启动日志轮询
                     // 确保从任务开始就能读取日志
-                    startReportLogRefresh();
-                    console.log('[Report日志] 任务创建成功，启动日志轮询');
+                    reportLogManager.start();
+                    console.log('[ReportLogManager] 任务创建成功，计数器已重置，启动日志轮询');
 
                     if (window.EventSource) {
                         openReportStream(reportTaskId);
@@ -5192,38 +5433,8 @@
         }
 
         // 【修复】启动Report Engine日志实时刷新
-        function startReportLogRefresh() {
-            // 防重复：如果已经在运行，直接返回
-            if (reportLogRefreshInterval) {
-                console.log('[Report日志] 日志轮询已在运行，跳过重复启动');
-                return;
-            }
-
-            // 立即刷新一次，获取当前所有日志
-            refreshReportLog();
-
-            // 启动定时器，每秒刷新一次
-            reportLogRefreshInterval = setInterval(() => {
-                if (currentApp === 'report') {
-                    refreshReportLog();
-                } else {
-                    // 如果切换到其他应用，自动停止轮询
-                    console.log('[Report日志] 检测到应用切换，停止日志轮询');
-                    stopReportLogRefresh();
-                }
-            }, 1000);  // 每秒刷新一次
-
-            console.log('[Report日志] 启动实时日志刷新，频率: 1秒');
-        }
-
-        // 【修复】停止Report Engine日志刷新
-        function stopReportLogRefresh() {
-            if (reportLogRefreshInterval) {
-                clearInterval(reportLogRefreshInterval);
-                reportLogRefreshInterval = null;
-                console.log('[Report日志] 停止日志刷新');
-            }
-        }
+        // 【新函数】使用新的日志管理器
+        // 旧的startReportLogRefresh和stopReportLogRefresh已废弃，请使用reportLogManager
 
         // 开始进度轮询
         function startProgressPolling(taskId) {
@@ -5243,10 +5454,10 @@
             .then(data => {
                 if (data.success) {
                     updateProgressDisplay(data.task);
-                    
-                    // 在检查进度时也刷新日志
-                    refreshReportLog();
-                    
+
+                    // 在检查进度时也刷新日志（使用新的日志管理器）
+                    // reportLogManager会自动处理轮询
+
                     if (data.task.status === 'completed') {
                         clearInterval(reportPollingInterval);
                         showMessage('报告生成完成！', 'success');
@@ -5460,8 +5671,8 @@
 
                 // 【修复】启动日志轮询，读取logger.info/debug/warning/error
                 // SSE只推送显式事件（stage/chapter_status等），logger日志需要轮询读取
-                startReportLogRefresh();
-                console.log('[Report日志] SSE连接建立，同步启动日志轮询');
+                reportLogManager.start();
+                console.log('[ReportLogManager] SSE连接建立，同步启动日志轮询');
             };
             reportEventSource.onerror = () => {
                 appendReportStreamLine('检测到网络抖动，SSE正在等待自动重连...', 'warn', { badge: 'SSE' });
@@ -5488,12 +5699,10 @@
                 clearTimeout(reportStreamReconnectTimer);
                 reportStreamReconnectTimer = null;
             }
-            // 清除日志刷新定时器
-            if (reportLogRefreshInterval) {
-                clearInterval(reportLogRefreshInterval);
-                reportLogRefreshInterval = null;
-                console.log('[Report日志] SSE连接关闭，停止日志轮询');
-            }
+            // 清除日志刷新（使用新的日志管理器）
+            reportLogManager.stop();
+            console.log('[ReportLogManager] SSE连接关闭，停止日志轮询');
+
             clearStreamHeartbeat();
             if (!keepIndicator) {
                 updateReportStreamStatus('idle');
@@ -5600,8 +5809,10 @@
                 case 'completed':
                     appendReportStreamLine(payload.message || '任务完成', 'success');
 
-                    // 【修复】任务完成前最后一次刷新日志，确保所有日志都被读取
-                    refreshReportLog();
+                    // 【修复】任务完成前强制刷新最后一次日志，确保所有日志都被读取
+                    if (reportLogManager && reportLogManager.isRunning) {
+                        reportLogManager.refresh();
+                    }
 
                     // 延迟500ms后关闭SSE，确保最后一次日志刷新完成
                     setTimeout(() => {
