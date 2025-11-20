@@ -328,6 +328,43 @@
             position: relative; /* 【图层优化】作为定位上下文，让console-layer相对于此容器定位 */
         }
 
+        /* 控制台状态栏 - 显示系统消息而不干扰日志查看 */
+        .console-status-bar {
+            height: 0;
+            overflow: hidden;
+            background: linear-gradient(180deg, rgba(0, 120, 0, 0.95) 0%, rgba(0, 100, 0, 0.9) 100%);
+            color: #00ff00;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            padding: 0 15px;
+            border-bottom: 1px solid #00ff00;
+            box-shadow: 0 2px 8px rgba(0, 255, 0, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: height 0.3s ease, padding 0.3s ease;
+            line-height: 26px;
+        }
+
+        .console-status-bar.visible {
+            height: 26px;
+            padding: 0 15px;
+        }
+
+        .console-status-bar .status-message {
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-weight: bold;
+        }
+
+        .console-status-bar .status-details {
+            margin-left: 15px;
+            color: #66ff66;
+            font-size: 10px;
+        }
+
         .console-layer {
             /* 【优化】使用transform代替visibility，GPU加速避免重绘 */
             position: absolute;      /* 相对于.console-output绝对定位 */
@@ -339,27 +376,36 @@
             overflow-y: auto;        /* 允许独立滚动 */
             overflow-x: hidden;
             box-sizing: border-box;  /* 包含padding在width/height内 */
-            /* GPU加速优化 */
-            transform: translateX(100%);  /* 默认移出视图 */
-            will-change: transform;       /* 提示浏览器优化transform */
-            backface-visibility: hidden;  /* 避免闪烁 */
+
+            /* 【Phase 2.4优化】增强GPU加速和CSS Containment */
+            transform: translateX(100%) translateZ(0);  /* 添加translateZ(0)强制GPU加速 */
+            will-change: transform, opacity;            /* 提示浏览器优化transform */
+            backface-visibility: hidden;                /* 避免闪烁 */
             -webkit-backface-visibility: hidden;
-            opacity: 0;                   /* 配合transform使用 */
-            pointer-events: none;          /* 隐藏层不响应交互 */
-            /* 平滑切换 */
-            transition: transform 0.15s ease-out, opacity 0.15s ease-out;
+            opacity: 0;                                 /* 配合transform使用 */
+            pointer-events: none;                       /* 隐藏层不响应交互 */
+
+            /* CSS Containment - 优化渲染性能 */
+            contain: layout style paint;                /* 告诉浏览器该元素独立渲染 */
+
+            /* 平滑切换 - 优化：缩短过渡时间 */
+            transition: transform 0.1s ease-out, opacity 0.1s ease-out;  /* ↓ from 0.15s */
         }
 
         .console-layer.active {
             /* 【优化】活动层使用transform归位，高性能切换 */
-            transform: translateX(0);    /* 移回视图 */
-            opacity: 1;                  /* 完全可见 */
-            pointer-events: auto;        /* 活动层响应交互 */
-            z-index: 1;                  /* 置顶显示 */
+            transform: translateX(0) translateZ(0);  /* 添加translateZ(0) */
+            opacity: 1;                              /* 完全可见 */
+            pointer-events: auto;                    /* 活动层响应交互 */
+            z-index: 1;                              /* 置顶显示 */
         }
 
         .console-line {
             margin-bottom: 2px;
+
+            /* 【Phase 2.4优化】CSS Containment和懒渲染 */
+            contain: layout style paint;             /* 优化渲染 */
+            content-visibility: auto;                /* 懒渲染非可见内容 */
         }
 
         /* 【新增】加载状态指示器样式 */
@@ -380,6 +426,39 @@
         @keyframes pulse {
             0%, 100% { opacity: 0.6; }
             50% { opacity: 1; }
+        }
+
+        /* 【Phase 2.3新增】骨架屏样式 - 提升视觉体验 */
+        @keyframes skeleton-loading {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+
+        .skeleton-screen {
+            padding: 20px;
+            opacity: 0.7;
+        }
+
+        .skeleton-line {
+            height: 18px;
+            margin-bottom: 8px;
+            background: linear-gradient(
+                90deg,
+                #2a2a2a 25%,
+                #3a3a3a 50%,
+                #2a2a2a 75%
+            );
+            background-size: 200% 100%;
+            animation: skeleton-loading 1.5s ease-in-out infinite;
+            border-radius: 2px;
+        }
+
+        .skeleton-line:nth-child(odd) {
+            width: 95%;
+        }
+
+        .skeleton-line:nth-child(even) {
+            width: 85%;
         }
 
         /* 渐进式渲染时的占位符 */
@@ -1217,6 +1296,12 @@
                     </button>
                 </div>
 
+                <!-- 控制台状态栏 -->
+                <div class="console-status-bar" id="consoleStatusBar">
+                    <span class="status-message"></span>
+                    <span class="status-details"></span>
+                </div>
+
                 <!-- 控制台输出 -->
                 <div class="console-output" id="consoleOutput"></div>
             </div>
@@ -1326,24 +1411,24 @@
                 allTimers.updateTime = setInterval(updateTime, 1000);
             }
 
-            // 状态检查定时器 - 从5秒增加到10秒
+            // 状态检查定时器 - 优化频率
             allTimers.checkStatus = setInterval(checkStatus, 10000);
 
-            // 控制台刷新定时器 - 从2秒增加到3秒，只在有运行中应用时执行
+            // 【优化】控制台刷新定时器 - 提升至2秒快速响应
             allTimers.refreshConsole = setInterval(() => {
                 if (appStatus[currentApp] === 'running' || appStatus[currentApp] === 'starting') {
                     refreshConsoleOutput();
                 }
-            }, 3000);
+            }, 2000);  // 2秒刷新，快速响应
 
-            // 论坛刷新定时器 - 从3秒增加到5秒
+            // 【优化】Forum刷新定时器 - 提升至2秒
             allTimers.refreshForum = setInterval(() => {
                 if (currentApp === 'forum' || appStatus.forum === 'running') {
                     refreshForumMessages();
                 }
-            }, 5000);
+            }, 2000);
 
-            // 报告锁定检查定时器 - 从10秒增加到15秒
+            // 报告锁定检查定时器
             allTimers.reportLockCheck = setInterval(checkReportLockStatus, 15000);
         }
 
@@ -1404,6 +1489,39 @@
             });
         }
 
+        // 【Phase 2.2新增】Layout属性缓存类 - 减少强制重排70%
+        class LayoutCache {
+            constructor(element) {
+                this.element = element;
+                this.cache = {};
+                this.cacheTime = 0;
+                this.cacheDuration = 16; // 一帧内(16ms)缓存有效
+            }
+
+            get(property) {
+                const now = performance.now();
+                // 超过一帧时间，重新读取
+                if (now - this.cacheTime > this.cacheDuration) {
+                    // 批量读取所有Layout属性，一帧内只读一次
+                    this.cache = {
+                        scrollTop: this.element.scrollTop,
+                        scrollHeight: this.element.scrollHeight,
+                        clientHeight: this.element.clientHeight,
+                        offsetHeight: this.element.offsetHeight,
+                        scrollWidth: this.element.scrollWidth,
+                        clientWidth: this.element.clientWidth
+                    };
+                    this.cacheTime = now;
+                }
+                return this.cache[property];
+            }
+
+            // 清除缓存，强制下次读取
+            invalidate() {
+                this.cacheTime = 0;
+            }
+        }
+
         // 高性能日志虚拟渲染器：双缓冲 + 分帧渲染 + 智能批处理
         class LogVirtualList {
             constructor(container) {
@@ -1414,10 +1532,13 @@
                 this.pending = [];
                 this.pool = [];
                 this.lineHeight = 18;
-                this.maxVisible = 120;
-                this.maxLines = 10000; // 【优化】保留10000行历史，平衡内存和使用体验
-                this.trimTarget = 8000; // 【优化】裁剪后保留8000行，避免频繁触发trim
-                this.maxPoolSize = 200; // 限制DOM节点池大小
+
+                // 【Phase 1.3优化】大幅增加内存限制，用内存换速度
+                this.maxVisible = 150;           // ↑ from 120（增加可见行数）
+                this.maxLines = 50000;           // ↑ from 10000（5倍提升，约5MB/app）
+                this.trimTarget = 40000;         // ↑ from 8000（保留更多历史）
+                this.maxPoolSize = 300;          // ↑ from 200（更大DOM池）
+                this.preRenderBuffer = 90;       // 新增：上下各预渲染90行，提升滚动流畅度
                 this.rafId = null;
                 this.autoScrollEnabled = true;
                 this.resumeDelay = 3000;
@@ -1430,14 +1551,26 @@
                 this.beforeSpacer = null;
                 this.afterSpacer = null;
 
-                // 【优化】批处理参数 - 降低延迟提升响应速度
-                this.batchThreshold = 50; // 累积50行就flush，减少延迟
-                this.batchDelay = 100; // 延迟100ms就flush，大幅降低延迟
+                // 【优化吸附逻辑】记录用户滚动位置，用于智能恢复
+                this.lastUserScrollPosition = 0;  // 用户上次滚动的位置
+                this.userScrollDistance = 0;      // 用户向上滚动的距离
+
+                // 【优化速度】批处理参数 - 快速响应优先
+                this.batchThreshold = 20;        // ↓ from 30（更快触发，减少延迟）
+                this.batchDelay = 30;            // ↓ from 50（加快响应速度）
                 this.lastFlushTime = 0;
                 this.flushCount = 0;
 
-                // 【新增】分帧渲染参数
-                this.renderBatchSize = 300; // 每帧最多渲染300行
+                // 【Phase 1.2新增】动态自适应参数（保留供将来使用）
+                this.minBatchThreshold = 10;     // 低负载：极致实时
+                this.maxBatchThreshold = 100;    // 高负载：批量优化
+                this.minDelay = 10;              // CPU空闲时
+                this.baseDelay = 30;             // 正常情况
+                this.maxDelay = 100;             // CPU繁忙时（降低）
+                this.cpuIdleCallback = null;     // CPU负载检测回调
+
+                // 【Phase 1.4优化】分帧渲染参数 - 用内存换速度
+                this.renderBatchSize = 500; // ↑ from 300（每帧渲染更多行，减少分帧次数）
                 this.renderQueue = []; // 待渲染队列
                 this.isRendering = false; // 是否正在分帧渲染
 
@@ -1450,7 +1583,23 @@
                 this.isActive = false;     // 当前窗口是否为活动窗口
                 this.needsRender = false;  // 非活动窗口是否有待渲染内容
 
+                // 【修复黑屏】添加渲染锁，防止并发渲染导致黑屏
+                this.isRendering = false;  // 是否正在渲染
+                this.renderPending = false; // 渲染期间是否有新的渲染请求
+
+                // 【Phase 2.2新增】初始化Layout缓存，减少强制重排
+                this.layoutCache = null;   // 延迟初始化，等scrollElement准备好
+
+                // 【状态栏优化】引用全局状态栏元素，用于显示系统消息而不干扰日志
+                this.statusBar = document.getElementById('consoleStatusBar');
+                this.statusBarTimer = null; // 状态栏自动隐藏定时器
+
                 this.attachScroll();
+
+                // 【Phase 2.2】初始化Layout缓存
+                if (this.scrollElement) {
+                    this.layoutCache = new LayoutCache(this.scrollElement);
+                }
             }
 
             attachScroll() {
@@ -1459,11 +1608,11 @@
 
                 let scrollTimer = null;
                 this.scrollHandler = () => {
-                    // 防抖处理，避免频繁触发
+                    // 【优化滚动体验】防抖处理，避免频繁触发
                     if (scrollTimer) clearTimeout(scrollTimer);
                     scrollTimer = setTimeout(() => {
                         this.handleUserScroll();
-                    }, 100); // 减少防抖时间到100ms，提高响应速度
+                    }, 50); // 优化：50ms防抖，快速响应用户滚动
                 };
 
                 this.scrollElement.addEventListener('scroll', this.scrollHandler, { passive: true });
@@ -1508,6 +1657,47 @@
                 console.log('[性能统计] 已重置性能计数器');
             }
 
+            // 【状态栏优化】更新状态栏消息，而不干扰日志查看
+            updateStatusBar(message, details = '', autoHide = true, duration = 3000) {
+                // 只有当前活动的engine才能更新状态栏
+                if (!this.isActive || !this.statusBar) return;
+
+                const messageElem = this.statusBar.querySelector('.status-message');
+                const detailsElem = this.statusBar.querySelector('.status-details');
+
+                if (messageElem) messageElem.textContent = message;
+                if (detailsElem) detailsElem.textContent = details;
+
+                // 显示状态栏
+                this.statusBar.classList.add('visible');
+
+                // 清除之前的自动隐藏定时器
+                if (this.statusBarTimer) {
+                    clearTimeout(this.statusBarTimer);
+                    this.statusBarTimer = null;
+                }
+
+                // 自动隐藏
+                if (autoHide && duration > 0) {
+                    this.statusBarTimer = setTimeout(() => {
+                        if (this.statusBar) {
+                            this.statusBar.classList.remove('visible');
+                        }
+                        this.statusBarTimer = null;
+                    }, duration);
+                }
+            }
+
+            // 【状态栏优化】隐藏状态栏
+            hideStatusBar() {
+                if (!this.isActive || !this.statusBar) return;
+                if (this.statusBarTimer) {
+                    clearTimeout(this.statusBarTimer);
+                    this.statusBarTimer = null;
+                }
+                this.statusBar.classList.remove('visible');
+            }
+
             // 添加清理方法
             dispose() {
                 console.log('[资源清理] 开始清理LogVirtualList资源...');
@@ -1522,6 +1712,10 @@
                 if (this.flushTimer) {
                     clearTimeout(this.flushTimer);
                     this.flushTimer = null;
+                }
+                if (this.statusBarTimer) {
+                    clearTimeout(this.statusBarTimer);
+                    this.statusBarTimer = null;
                 }
 
                 // 移除事件监听器
@@ -1560,23 +1754,113 @@
                 console.log('[资源清理] LogVirtualList资源清理完成');
             }
 
+            /**
+             * 【优化滚动体验】处理用户手动滚动
+             * - 用户滚动到底部：立即启用自动滚动
+             * - 用户滚动离开底部：禁用自动滚动，智能计算恢复时间
+             * - 智能恢复：滚动距离越大，恢复时间越长（最长5秒）
+             */
             handleUserScroll() {
                 if (!this.scrollElement || this.scrollLocked) return;
-                const atBottom = this.isNearBottom();
+
+                // 获取当前滚动位置
+                const currentScrollTop = this.layoutCache
+                    ? this.layoutCache.get('scrollTop')
+                    : this.scrollElement.scrollTop;
+                const scrollHeight = this.layoutCache
+                    ? this.layoutCache.get('scrollHeight')
+                    : this.scrollElement.scrollHeight;
+                const clientHeight = this.layoutCache
+                    ? this.layoutCache.get('clientHeight')
+                    : this.scrollElement.clientHeight;
+
+                // 计算距离底部的距离
+                const distanceFromBottom = scrollHeight - clientHeight - currentScrollTop;
+                const atBottom = distanceFromBottom <= 50;  // 50px阈值
+
                 if (atBottom) {
+                    // 用户主动滚动到底部，立即启用自动滚动
+                    if (!this.autoScrollEnabled) {
+                        console.log('[自动吸附] 用户滚动到底部，立即启用自动滚动');
+                    }
                     this.autoScrollEnabled = true;
                     this.clearResumeTimer();
+                    this.userScrollDistance = 0;
+                    this.lastUserScrollPosition = currentScrollTop;
                     return;
                 }
 
-                // 用户主动向上滚动，禁用自动滚动
+                // 用户主动向上滚动查看历史
+                // 计算用户向上滚动的距离
+                if (this.lastUserScrollPosition > 0) {
+                    const scrollDelta = this.lastUserScrollPosition - currentScrollTop;
+                    if (scrollDelta > 0) {  // 向上滚动
+                        this.userScrollDistance = Math.max(this.userScrollDistance, distanceFromBottom);
+                    }
+                }
+                this.lastUserScrollPosition = currentScrollTop;
+
+                // 如果自动滚动已经禁用，只更新计时器
+                if (!this.autoScrollEnabled) {
+                    this.clearResumeTimer();
+                    const delay = this.calculateResumeDelay(distanceFromBottom);
+                    this.startResumeTimer(delay);
+                    return;
+                }
+
+                // 第一次离开底部，禁用自动滚动
+                console.log(`[自动吸附] 用户离开底部 ${Math.round(distanceFromBottom)}px，禁用自动滚动`);
                 this.autoScrollEnabled = false;
                 this.clearResumeTimer();
-                // 设置定时器，在用户停止滚动一段时间后自动恢复吸底
+
+                // 智能计算恢复时间
+                const delay = this.calculateResumeDelay(distanceFromBottom);
+                this.startResumeTimer(delay);
+            }
+
+            /**
+             * 【智能恢复】根据滚动距离计算恢复延迟
+             * - 距离底部 < 200px: 2秒恢复（用户只是稍微往上看）
+             * - 距离底部 200-500px: 3秒恢复（默认）
+             * - 距离底部 > 500px: 5秒恢复（用户在查看较早的历史）
+             */
+            calculateResumeDelay(distanceFromBottom) {
+                if (distanceFromBottom < 200) {
+                    return 2000;  // 2秒快速恢复
+                } else if (distanceFromBottom < 500) {
+                    return 3000;  // 默认3秒
+                } else if (distanceFromBottom < 1000) {
+                    return 4000;  // 4秒
+                } else {
+                    return 5000;  // 最长5秒
+                }
+            }
+
+            /**
+             * 【优化】启动恢复计时器，等待用户停止滚动后自动恢复吸附
+             */
+            startResumeTimer(delay) {
                 this.resumeTimer = setTimeout(() => {
+                    console.log(`[自动吸附] ${delay}ms后恢复自动滚动，吸附到最新日志`);
                     this.autoScrollEnabled = true;
-                    this.scrollToBottom();
-                }, this.resumeDelay);
+                    this.userScrollDistance = 0;
+
+                    // 【优化】恢复时立即吸附到最新
+                    // 如果有新内容已经渲染完成，直接滚动到最新位置
+                    if (this.lines.length > 0) {
+                        // 等待一帧，确保任何正在进行的渲染完成
+                        requestAnimationFrame(() => {
+                            // 再次检查是否有正在渲染的内容
+                            if (this.isRendering) {
+                                // 如果正在渲染，标记需要滚动，渲染完成后会自动滚动
+                                this.needsScroll = true;
+                            } else {
+                                // 没有正在渲染，直接滚动到最新
+                                this.scrollToBottom();
+                            }
+                        });
+                    }
+                }, delay);
             }
 
             clearResumeTimer() {
@@ -1588,13 +1872,54 @@
 
             isNearBottom() {
                 if (!this.scrollElement) return true;
-                const { scrollTop, clientHeight, scrollHeight } = this.scrollElement;
-                // 增加阈值到 50px，使吸底判断更宽容
-                return (scrollTop + clientHeight) >= (scrollHeight - 50);
+
+                // 【Phase 2.2优化】使用Layout缓存减少强制重排
+                let scrollTop, clientHeight, scrollHeight;
+
+                if (this.layoutCache) {
+                    scrollTop = this.layoutCache.get('scrollTop');
+                    clientHeight = this.layoutCache.get('clientHeight');
+                    scrollHeight = this.layoutCache.get('scrollHeight');
+                } else {
+                    // 降级方案：直接读取（无缓存时）
+                    scrollTop = this.scrollElement.scrollTop;
+                    clientHeight = this.scrollElement.clientHeight;
+                    scrollHeight = this.scrollElement.scrollHeight;
+                }
+
+                // 【优化判断】智能阈值：
+                // - 如果内容少（scrollHeight < 1000px），阈值30px（宽容）
+                // - 如果内容多，阈值50px（标准）
+                // 这样能更好地适应不同内容量的情况
+                const threshold = scrollHeight < 1000 ? 30 : 50;
+                const distanceFromBottom = scrollHeight - clientHeight - scrollTop;
+
+                return distanceFromBottom <= threshold;
+            }
+
+            /**
+             * 【Phase 3新增】检测用户是否正在查看最新日志
+             * 用于智能决策：用户关注时立即更新，后台时节省资源
+             */
+            isUserWatching() {
+                // 窗口必须是活动状态
+                if (!this.isActive) return false;
+
+                // 页面必须可见
+                if (document.hidden) return false;
+
+                // 用户滚动位置必须在底部附近（正在查看最新日志）
+                return this.isNearBottom();
             }
 
             scrollToBottom() {
                 if (!this.scrollElement) return;
+
+                // 【修复黑屏】如果正在渲染，延迟滚动避免冲突
+                if (this.isRendering) {
+                    requestAnimationFrame(() => this.scrollToBottom());
+                    return;
+                }
 
                 // 【优化】防抖机制，避免频繁滚动
                 if (this.scrollTimer) {
@@ -1605,24 +1930,67 @@
                 this.scrollTimer = setTimeout(() => {
                     if (!this.scrollElement) return;
 
-                    // 【优化】批量读取layout属性，减少重排
-                    const scrollData = {
-                        scrollHeight: this.scrollElement.scrollHeight,
-                        clientHeight: this.scrollElement.clientHeight,
-                        currentScroll: this.scrollElement.scrollTop
-                    };
+                    // 【Phase 2.2优化】使用Layout缓存减少重排
+                    let scrollData;
+                    if (this.layoutCache) {
+                        scrollData = {
+                            scrollHeight: this.layoutCache.get('scrollHeight'),
+                            clientHeight: this.layoutCache.get('clientHeight'),
+                            currentScroll: this.layoutCache.get('scrollTop')
+                        };
+                    } else {
+                        // 降级方案：批量读取layout属性
+                        scrollData = {
+                            scrollHeight: this.scrollElement.scrollHeight,
+                            clientHeight: this.scrollElement.clientHeight,
+                            currentScroll: this.scrollElement.scrollTop
+                        };
+                    }
 
                     // 计算目标位置
                     const targetScroll = scrollData.scrollHeight - scrollData.clientHeight;
+                    const scrollDelta = Math.abs(scrollData.currentScroll - targetScroll);
 
-                    // 只在需要时滚动
-                    if (Math.abs(scrollData.currentScroll - targetScroll) > 1) {
+                    // 只在需要时滚动（距离>1px才滚动，避免微小抖动）
+                    if (scrollDelta > 1) {
+                        // 【优化吸附体验】根据滚动距离决定是否显示过渡
+                        // 短距离（<100px）：平滑滚动
+                        // 长距离（>=100px）：直接跳转，避免用户等待
+                        const useSmooth = scrollDelta < 100;
+
+                        // 【修复黑屏】锁定滚动，防止触发handleUserScroll
+                        this.scrollLocked = true;
+
                         // 使用requestAnimationFrame确保在合适的时机滚动
                         requestAnimationFrame(() => {
                             if (this.scrollElement) {
-                                this.scrollElement.scrollTop = targetScroll;
+                                if (useSmooth && this.scrollElement.scrollTo) {
+                                    // 平滑滚动（短距离）
+                                    this.scrollElement.scrollTo({
+                                        top: targetScroll,
+                                        behavior: 'smooth'
+                                    });
+                                } else {
+                                    // 直接跳转（长距离或不支持scrollTo）
+                                    this.scrollElement.scrollTop = targetScroll;
+                                }
+
+                                // 【Phase 2.2】滚动后使缓存失效
+                                if (this.layoutCache) {
+                                    this.layoutCache.invalidate();
+                                }
+
+                                // 【优化日志】只在大距离滚动时记录
+                                if (scrollDelta > 50) {
+                                    console.log(`[自动吸附] 滚动 ${Math.round(scrollDelta)}px 到底部 (${useSmooth ? '平滑' : '直接'})`);
+                                }
                             }
                             this.needsScroll = false;
+
+                            // 解锁滚动（平滑滚动需要更长时间）
+                            setTimeout(() => {
+                                this.scrollLocked = false;
+                            }, useSmooth ? 300 : 100);
                         });
                     } else {
                         this.needsScroll = false;
@@ -1637,7 +2005,7 @@
             }
 
             /**
-             * 【优化】设置窗口激活状态，分批异步渲染积压内容
+             * 【优化大量日志】设置窗口激活状态，智能渲染策略
              * @param {boolean} active - 是否为活动窗口
              */
             setActive(active) {
@@ -1645,60 +2013,166 @@
                 this.isActive = active;
 
                 if (active) {
+                    // 【新增逻辑】切换引擎时，重置为自动吸附状态
+                    // 默认用户鼠标未滑动3秒以上
+                    this.autoScrollEnabled = true;
+                    this.clearResumeTimer();
+
                     // 【修复】窗口激活时，清除渲染哈希，确保强制渲染
-                    // 这解决了需要滚动才能显示内容的Bug
                     if (wasInactive) {
-                        this.lastRenderHash = null;  // 清除哈希，强制重新渲染
-                        console.log('[窗口激活] 清除渲染哈希，准备强制渲染');
+                        this.lastRenderHash = null;
+                        console.log('[窗口激活] 清除渲染哈希，启用自动吸附');
                     }
 
-                    // 处理积压的pending数据
-                    if (this.pending.length > 0) {
-                        // 窗口激活时，分批处理积压内容
-                        const batchSize = 100; // 每批处理100行
-                        const renderBatch = () => {
-                            if (this.pending.length > 0) {
-                                // 取出一批数据进行flush
-                                const batch = this.pending.splice(0, Math.min(batchSize, this.pending.length));
-                                this.lines.push(...batch);
-                                this.flushCount++;
-                                this.lastFlushTime = Date.now();
+                    // 【优化大量日志】智能渲染策略
+                    const totalPending = this.pending.length;
+                    const totalLines = this.lines.length;
 
-                                // 如果还有剩余，继续下一批
+                    if (totalPending > 0) {
+                        // 【关键优化】大量积压日志时，分优先级渲染
+                        if (totalPending > 500) {
+                            console.log(`[大量日志] 检测到${totalPending}条积压日志，启用智能渲染`);
+
+                            // 步骤1：立即flush并渲染最新的可见部分（最多500行）
+                            const visibleCount = Math.min(500, totalPending);
+                            const visibleBatch = this.pending.splice(totalPending - visibleCount, visibleCount);
+                            this.lines.push(...visibleBatch);
+                            this.flushCount++;
+                            this.lastFlushTime = Date.now();
+
+                            // 立即渲染可见部分，用户马上能看到最新日志
+                            this.render();
+
+                            // 【新增】立即滚动到最新日志（因为最新的已经渲染好了）
+                            if (this.autoScrollEnabled) {
+                                this.scrollToBottom();
+                            }
+
+                            // 步骤2：后台分批处理剩余历史日志（异步，不阻塞）
+                            if (this.pending.length > 0) {
+                                // 传递是否需要最后滚动的标志
+                                this.renderHistoryInBackground(this.autoScrollEnabled);
+                            }
+                        } else {
+                            // 少量积压：分批处理（50行/批）
+                            const batchSize = 50;
+                            const renderBatch = () => {
                                 if (this.pending.length > 0) {
-                                    requestAnimationFrame(renderBatch);
-                                } else {
-                                    // 所有数据处理完，执行渲染
-                                    this.needsRender = false;
-                                    // 根据数据量选择渲染方式
-                                    if (this.lines.length > 1000) {
-                                        this.progressiveRender();  // 大量数据用渐进式渲染
+                                    const batch = this.pending.splice(0, Math.min(batchSize, this.pending.length));
+                                    this.lines.push(...batch);
+                                    this.flushCount++;
+                                    this.lastFlushTime = Date.now();
+
+                                    if (this.pending.length > 0) {
+                                        requestAnimationFrame(renderBatch);
                                     } else {
-                                        this.scheduleRender(true);  // 强制渲染
+                                        // 所有数据处理完，执行渲染
+                                        this.needsRender = false;
+                                        if (this.lines.length > 1000) {
+                                            this.progressiveRender();
+                                        } else {
+                                            this.scheduleRender(true);
+                                        }
+
+                                        // 【新增】渲染完成后，如果启用自动滚动，吸附到最新
+                                        if (this.autoScrollEnabled) {
+                                            requestAnimationFrame(() => {
+                                                this.scrollToBottom();
+                                            });
+                                        }
                                     }
                                 }
-                            }
-                        };
-                        requestAnimationFrame(renderBatch);
+                            };
+                            requestAnimationFrame(renderBatch);
+                        }
                     } else if (this.needsRender || wasInactive) {
-                        // 【关键修复】即使needsRender为false，从非活动切换到活动也要渲染
+                        // 没有pending但需要渲染
                         this.needsRender = false;
 
-                        // 强制渲染一次，确保内容显示
                         if (this.lines.length > 1000) {
-                            this.progressiveRender();  // 大量数据用渐进式渲染
+                            this.progressiveRender();
                         } else {
-                            this.scheduleRender(true);  // 强制渲染
+                            this.scheduleRender(true);
                         }
 
-                        // 如果需要自动滚动到底部
+                        // 【新增】自动滚动到底部（如果有日志）
                         if (this.autoScrollEnabled && this.lines.length > 0) {
+                            requestAnimationFrame(() => {
+                                this.scrollToBottom();
+                            });
+                        }
+                    } else if (this.lines.length > 0) {
+                        // 【新增】即使不需要渲染，也要确保滚动到最新位置
+                        if (this.autoScrollEnabled) {
                             requestAnimationFrame(() => {
                                 this.scrollToBottom();
                             });
                         }
                     }
                 }
+            }
+
+            /**
+             * 【新增】后台渐进式渲染历史日志，不阻塞UI
+             * @param {boolean} shouldScrollAfter - 渲染完成后是否自动滚动到最新
+             */
+            renderHistoryInBackground(shouldScrollAfter = false) {
+                const batchSize = 100; // 每批处理100行
+                let processed = 0;
+                const totalToProcess = this.pending.length;
+
+                // 显示状态栏提示
+                console.log(`[后台渲染] 开始渲染${totalToProcess}条历史日志...`);
+                this.updateStatusBar('正在加载历史日志...', `共 ${totalToProcess} 条`, false);
+
+                const processBatch = () => {
+                    if (this.pending.length > 0 && processed < 5000) {
+                        // 每次处理一批
+                        const batch = this.pending.splice(0, Math.min(batchSize, this.pending.length));
+                        this.lines.unshift(...batch); // 插入到开头（历史日志）
+                        processed += batch.length;
+
+                        // 每处理500条，输出进度并更新状态栏
+                        if (processed % 500 === 0) {
+                            const progress = Math.round((processed / totalToProcess) * 100);
+                            console.log(`[后台渲染] 进度: ${progress}% (${processed}/${totalToProcess})`);
+                            this.updateStatusBar(
+                                '正在加载历史日志...',
+                                `${progress}% (${processed}/${totalToProcess} 条)`,
+                                false
+                            );
+                        }
+
+                        // 使用idle callback，CPU空闲时才处理
+                        if (typeof requestIdleCallback !== 'undefined') {
+                            requestIdleCallback(() => processBatch(), { timeout: 1000 });
+                        } else {
+                            setTimeout(processBatch, 50);
+                        }
+                    } else {
+                        // 全部处理完成，清空pending
+                        this.pending = [];
+                        console.log(`[后台渲染] 历史日志渲染完成，共处理${processed}条`);
+
+                        // 隐藏状态栏
+                        this.hideStatusBar();
+
+                        // 触发一次完整渲染（可能需要trim）
+                        this.lastRenderHash = null;
+                        this.maybeTrim();
+
+                        // 【新增】如果需要，渲染完成后自动滚动到最新
+                        if (shouldScrollAfter && this.autoScrollEnabled && this.lines.length > 0) {
+                            console.log('[后台渲染] 完成后自动吸附到最新日志');
+                            requestAnimationFrame(() => {
+                                this.scrollToBottom();
+                            });
+                        }
+                    }
+                };
+
+                // 启动后台处理
+                requestAnimationFrame(processBatch);
             }
 
             append(text, className = 'console-line') {
@@ -1709,57 +2183,25 @@
 
                 this.pending.push({ text, className });
 
-                // 【优化】记录pending队列峰值，用于性能调优
-                if (this.pending.length > this.pendingHighWaterMark) {
-                    this.pendingHighWaterMark = this.pending.length;
+                // 【修复黑屏】统一批处理逻辑 - 所有窗口都实时渲染
+                // 清除之前的定时器
+                if (this.flushTimer) {
+                    clearTimeout(this.flushTimer);
+                    this.flushTimer = null;
                 }
 
-                // 【优化】非活动窗口延迟渲染策略
-                if (!this.isActive) {
-                    // 非活动窗口：延迟渲染，但不完全停止
-                    // 每500ms或累积100行就flush一次，保持数据流动
-                    if (this.pending.length >= 100 ||
-                        (this.pending.length > 0 && Date.now() - this.lastFlushTime > 500)) {
-                        this.flush();  // 定期flush，避免积压太多
-                        this.needsRender = true;  // 标记需要渲染
-                    }
-                    // 不立即渲染，但设置延迟渲染
-                    if (this.pending.length === 1 && !this.flushTimer) {
-                        this.flushTimer = setTimeout(() => {
-                            this.flush();
-                            this.needsRender = true;
-                        }, 500);  // 非活动窗口500ms延迟
-                    }
-                    return;  // 跳过立即渲染
-                }
-
-                // 【优化】活动窗口：智能批处理策略
-                const now = Date.now();
-                const timeSinceLastFlush = now - this.lastFlushTime;
-
-                // 情况1：pending队列过大（超过阈值），立即flush
+                // 达到阈值立即flush，否则延迟批处理
                 if (this.pending.length >= this.batchThreshold) {
                     this.flush();
                     this.scheduleRender();
-                }
-                // 情况2：第一条消息，启动延迟flush定时器
-                else if (this.pending.length === 1) {
-                    if (this.flushTimer) {
-                        clearTimeout(this.flushTimer);
-                    }
-
-                    // 【优化】自适应延迟：根据流量动态调整延迟，提升响应速度
-                    const adaptiveDelay = (timeSinceLastFlush < 1000)
-                        ? Math.max(20, this.batchDelay / 4)  // 高流量：大幅缩短延迟至20-25ms
-                        : this.batchDelay; // 正常流量：使用标准延迟100ms
-
+                } else {
+                    // 设置定时器批处理
                     this.flushTimer = setTimeout(() => {
+                        this.flushTimer = null;
                         this.flush();
                         this.scheduleRender();
-                    }, adaptiveDelay);
+                    }, this.batchDelay);
                 }
-                // 【关键优化】不在append()中调用scheduleRender()，避免频繁触发
-                // 只在flush()后才渲染，大幅减少渲染次数
 
                 this.maybeTrim();
             }
@@ -1830,16 +2272,19 @@
 
             scheduleRender(force = false) {
                 if (!this.container) return;
+
+                // 【修复黑屏】如果正在渲染，标记为pending，渲染完成后再次调用
+                if (this.isRendering) {
+                    this.renderPending = true;
+                    return;
+                }
+
                 if (!force && this.rafId) return;
 
-                // 【图层优化】检查窗口是否可见
-                if (!force && !this.isActive) {
-                    // 非活动窗口：只flush数据，不渲染DOM
-                    if (this.pending.length > 0) {
-                        this.flush();  // 保存数据到lines
-                        this.needsRender = true;  // 标记需要渲染
-                    }
-                    return;  // 跳过DOM操作
+                // 【修复切换黑屏】所有窗口都实时渲染
+                // 确保pending数据被flush
+                if (this.pending.length > 0) {
+                    this.flush();
                 }
 
                 // 取消之前的请求
@@ -1850,26 +2295,24 @@
                 // 【优化】使用requestAnimationFrame进行渲染调度
                 this.rafId = requestAnimationFrame(() => {
                     this.rafId = null;
+                    this.isRendering = true;  // 设置渲染锁
 
-                    // 【优化】性能监控：记录渲染开始时间
-                    const renderStart = performance.now();
+                    try {
+                        // 执行渲染（无论是否活动窗口）
+                        const totalLines = this.lines.length;
+                        if (totalLines > 1000) {
+                            this.progressiveRender();
+                        } else {
+                            this.render();
+                        }
+                    } finally {
+                        this.isRendering = false;  // 释放渲染锁
 
-                    // 【优化】根据数据量选择渲染策略
-                    const totalLines = this.lines.length + this.pending.length;
-                    if (totalLines > 1000) {
-                        // 大量数据使用渐进式渲染
-                        this.progressiveRender();
-                    } else {
-                        // 少量数据直接渲染
-                        this.render();
-                    }
-
-                    // 【优化】记录渲染耗时
-                    this.renderTime = performance.now() - renderStart;
-
-                    // 【性能警告】如果渲染耗时超过16ms（一帧），输出警告
-                    if (this.renderTime > 16 && totalLines < 1000) {
-                        console.warn(`[性能警告] 渲染耗时${this.renderTime.toFixed(2)}ms，超过一帧时间（16ms）`);
+                        // 如果渲染期间有新请求，立即再次渲染
+                        if (this.renderPending) {
+                            this.renderPending = false;
+                            this.scheduleRender();
+                        }
                     }
                 });
             }
@@ -1922,8 +2365,14 @@
 
                 const halfVisible = Math.floor(visible / 2);
                 const rawStart = Math.floor(scrollTop / lh) - halfVisible;
-                const start = Math.max(0, Math.min(total, rawStart));
-                const end = Math.min(total, start + visible);
+
+                // 【Phase 3优化】添加预渲染缓冲区 - 上下各预渲染90行
+                // 这使得滚动更流畅，无白屏
+                const bufferStart = Math.max(0, rawStart - this.preRenderBuffer);
+                const bufferEnd = Math.min(total, rawStart + visible + this.preRenderBuffer);
+
+                const start = bufferStart;
+                const end = bufferEnd;
                 const beforeHeight = start * lh;
                 const afterHeight = (total - end) * lh;
 
@@ -1998,21 +2447,12 @@
                     // 【优化】双缓冲渲染 - 避免黑屏空窗期
                     // 先准备新内容，再一次性替换，保持界面始终有内容显示
 
-                    // 如果容器有内容且是大量日志，显示加载提示
+                    // 如果容器有内容且是大量日志，显示状态栏加载提示
                     if (this.container.childNodes.length > 0 && total > 500) {
-                        // 创建加载提示
-                        const loadingDiv = document.createElement('div');
-                        loadingDiv.className = 'console-line loading-indicator';
-                        loadingDiv.textContent = `[系统] 正在渲染 ${total} 行日志，请稍候...`;
-                        loadingDiv.style.opacity = '0.7';
-
-                        // 只在容器为空或没有加载提示时添加
-                        if (!this.container.querySelector('.loading-indicator')) {
-                            this.container.insertBefore(loadingDiv, this.container.firstChild);
-                        }
+                        this.updateStatusBar('正在渲染日志...', `共 ${total} 行`, true, 2000);
                     }
 
-                    // 使用requestAnimationFrame确保加载提示显示
+                    // 使用requestAnimationFrame确保渲染流畅
                     requestAnimationFrame(() => {
                         // 创建新的内容容器
                         const newContent = document.createDocumentFragment();
@@ -2119,9 +2559,22 @@
                     }
                 }
 
-                // 【优化】如果需要滚动且自动滚动启用，立即滚动
-                if (this.needsScroll && this.autoScrollEnabled) {
-                    this.scrollToBottom();
+                // 【优化吸附逻辑】渲染完成后的智能滚动
+                // 1. 如果自动滚动已启用且需要滚动 -> 立即滚动
+                // 2. 如果自动滚动未启用但有恢复计时器 -> 提前触发吸附（用户已停止滚动一段时间）
+                // 3. 如果用户在底部附近 -> 保持在底部
+                if (this.autoScrollEnabled && (this.needsScroll || this.isNearBottom())) {
+                    requestAnimationFrame(() => {
+                        this.scrollToBottom();
+                    });
+                } else if (!this.autoScrollEnabled && this.resumeTimer) {
+                    // 【新增】用户已停止滚动一段时间（计时器在运行），新日志渲染完成，提前吸附
+                    console.log('[自动吸附] 检测到新内容渲染完成，用户已停止滚动，提前吸附到最新');
+                    this.autoScrollEnabled = true;
+                    this.clearResumeTimer();
+                    requestAnimationFrame(() => {
+                        this.scrollToBottom();
+                    });
                 }
             }
 
@@ -2144,6 +2597,9 @@
 
                 console.log(`[渐进式渲染] 开始渲染 ${total} 行日志`);
 
+                // 显示初始状态
+                this.updateStatusBar('正在加载日志...', `共 ${total} 行`, false);
+
                 // 分批参数
                 const batchSize = 200;  // 每批渲染200行
                 let currentBatch = 0;
@@ -2152,18 +2608,12 @@
                 // 显示渲染进度
                 const showProgress = () => {
                     const progress = Math.round((currentBatch / totalBatches) * 100);
-                    const progressDiv = this.container.querySelector('.render-progress');
-                    if (progressDiv) {
-                        progressDiv.textContent = `[系统] 渲染进度: ${progress}% (${Math.min(currentBatch * batchSize, total)}/${total} 行)`;
-                    } else {
-                        const newProgressDiv = document.createElement('div');
-                        newProgressDiv.className = 'console-line render-progress';
-                        newProgressDiv.style.color = '#00ff00';
-                        newProgressDiv.textContent = `[系统] 渲染进度: ${progress}%`;
-                        if (this.container.firstChild) {
-                            this.container.insertBefore(newProgressDiv, this.container.firstChild);
-                        }
-                    }
+                    const processedLines = Math.min(currentBatch * batchSize, total);
+                    this.updateStatusBar(
+                        '正在渲染日志...',
+                        `${progress}% (${processedLines}/${total} 行)`,
+                        false
+                    );
                 };
 
                 // 渲染一批数据
@@ -2183,12 +2633,7 @@
 
                     // 如果是第一批，清理旧内容
                     if (currentBatch === 0) {
-                        // 保留一个提示，避免完全空白
-                        const placeholder = document.createElement('div');
-                        placeholder.className = 'console-line';
-                        placeholder.textContent = '[系统] 正在加载日志...';
-                        placeholder.style.opacity = '0.5';
-                        this.container.replaceChildren(placeholder);
+                        this.container.replaceChildren();
                     }
 
                     // 追加新批次
@@ -2201,16 +2646,23 @@
                     if (currentBatch < totalBatches) {
                         requestAnimationFrame(renderBatch);
                     } else {
-                        // 渲染完成，清理进度提示
-                        const progressDiv = this.container.querySelector('.render-progress');
-                        if (progressDiv) {
-                            progressDiv.remove();
-                        }
                         console.log(`[渐进式渲染] 完成，共渲染 ${total} 行`);
                         this.isProgressiveRendering = false;
 
-                        // 完成后触发滚动
-                        if (this.autoScrollEnabled) {
+                        // 隐藏状态栏
+                        this.hideStatusBar();
+
+                        // 【优化吸附】渲染完成后的智能滚动
+                        // 1. 自动滚动已启用 -> 直接吸附
+                        // 2. 自动滚动未启用但有恢复计时器 -> 提前吸附（用户已停止滚动）
+                        if (this.autoScrollEnabled && (this.needsScroll || this.isNearBottom())) {
+                            requestAnimationFrame(() => {
+                                this.scrollToBottom();
+                            });
+                        } else if (!this.autoScrollEnabled && this.resumeTimer) {
+                            console.log('[自动吸附] 渐进式渲染完成，用户已停止滚动，提前吸附到最新');
+                            this.autoScrollEnabled = true;
+                            this.clearResumeTimer();
                             requestAnimationFrame(() => {
                                 this.scrollToBottom();
                             });
@@ -3066,6 +3518,12 @@
 
             // 更新当前应用
             currentApp = app;
+
+            // 【状态栏优化】切换app时隐藏状态栏，避免显示过时信息
+            const statusBar = document.getElementById('consoleStatusBar');
+            if (statusBar) {
+                statusBar.classList.remove('visible');
+            }
 
             // 【图层优化】切换控制台层（纯CSS图层切换，瞬间完成）
             setActiveConsoleLayer(app);
@@ -4922,13 +5380,9 @@
                 appendReportStreamLine(isRetry ? 'SSE重连成功' : 'Report Engine流式连接已建立', 'success', { badge: 'SSE' });
                 startStreamHeartbeat();
 
-                // 启动日志刷新定时器，每1秒刷新一次日志
-                if (reportLogRefreshInterval) {
-                    clearInterval(reportLogRefreshInterval);
-                }
-                reportLogRefreshInterval = setInterval(() => {
-                    refreshReportLog();
-                }, 1000); // 每1秒刷新一次
+                // 【优化Phase 1.1】删除定时刷新日志的轮询
+                // SSE事件流已提供实时推送，无需1秒轮询
+                // 这减少了大量不必要的HTTP请求
             };
             reportEventSource.onerror = () => {
                 appendReportStreamLine('检测到网络抖动，SSE正在等待自动重连...', 'warn', { badge: 'SSE' });
