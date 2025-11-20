@@ -23,6 +23,10 @@
             overflow-x: hidden;
         }
 
+        :root {
+            --console-offset: 52px; /* app切换行 + 状态条的预留高度，运行时同步 */
+        }
+
         .container {
             max-width: 100vw;
             height: 100vh; /* 固定高度为视口高度 */
@@ -177,7 +181,7 @@
         .upload-button input[type="file"] {
             position: absolute;
             left: 0;
-            top: 0;
+            top: 52px; /* 运行时再用JS同步为app-switcher的真实高度 */
             width: 100%;
             height: 100%;
             opacity: 0;
@@ -238,6 +242,7 @@
             background-color: #ffffff;
             min-height: 0; /* 允许子元素缩小 */
             overflow: hidden; /* 防止内容溢出 */
+            position: relative; /* 让状态栏悬浮不占用布局空间 */
         }
 
         /* 应用切换按钮 */
@@ -330,7 +335,11 @@
 
         /* 控制台状态栏 - 显示系统消息而不干扰日志查看 */
         .console-status-bar {
-            height: 0;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 26px;
             overflow: hidden;
             background: linear-gradient(180deg, rgba(0, 120, 0, 0.95) 0%, rgba(0, 100, 0, 0.9) 100%);
             color: #00ff00;
@@ -342,13 +351,17 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            transition: height 0.3s ease, padding 0.3s ease;
+            pointer-events: none; /* 不抢占滚动 */
+            z-index: 2;
+            opacity: 0;
+            transform: translateY(-110%);
+            transition: transform 0.2s ease, opacity 0.2s ease;
             line-height: 26px;
         }
 
         .console-status-bar.visible {
-            height: 26px;
-            padding: 0 15px;
+            opacity: 1;
+            transform: translateY(0);
         }
 
         .console-status-bar .status-message {
@@ -372,7 +385,7 @@
             left: 0;
             width: 100%;
             height: 100%;            /* 填满整个黑色框 */
-            padding: 15px;           /* 图层内边距 */
+            padding: var(--console-offset, 52px) 15px 15px; /* 顶部预留给状态栏与按钮，不影响滚动计算 */
             overflow-y: auto;        /* 允许独立滚动 */
             overflow-x: hidden;
             box-sizing: border-box;  /* 包含padding在width/height内 */
@@ -1540,8 +1553,13 @@
                 this.maxVisible = 150;           // ↑ from 120（增加可见行数）
                 this.maxLines = 50000;           // ↑ from 10000（5倍提升，约5MB/app）
                 this.trimTarget = 40000;         // ↑ from 8000（保留更多历史）
-                this.maxPoolSize = 300;          // ↑ from 200（更大DOM池）
                 this.preRenderBuffer = 90;       // 新增：上下各预渲染90行，提升滚动流畅度
+                this.minPoolSize = 220;          // 保底DOM池，避免窗口渲染空白
+                this.poolHardLimit = 800;        // 池子硬上限，防止撑爆内存
+                this.maxPoolSize = Math.max(
+                    this.minPoolSize,
+                    this.maxVisible + this.preRenderBuffer * 2 + 50
+                ); // 默认覆盖可视窗口+缓冲区，再留一些余量
                 this.rafId = null;
                 this.autoScrollEnabled = true;
                 this.resumeDelay = 3000;
@@ -1553,6 +1571,10 @@
                 this.scrollHandler = null;
                 this.beforeSpacer = null;
                 this.afterSpacer = null;
+                this.watchdogTimer = null;
+                this.lastRenderAt = 0;
+                this.idleTimer = null;
+                this.idleTimeout = 3000; // 用户3秒不滚动后自动吸附
 
                 // 【优化吸附逻辑】记录用户滚动位置，用于智能恢复
                 this.lastUserScrollPosition = 0;  // 用户上次滚动的位置
@@ -1602,6 +1624,90 @@
                 // 【Phase 2.2】初始化Layout缓存
                 if (this.scrollElement) {
                     this.layoutCache = new LayoutCache(this.scrollElement);
+                }
+            }
+
+            clearIdleTimer() {
+                if (this.idleTimer) {
+                    clearTimeout(this.idleTimer);
+                    this.idleTimer = null;
+                }
+            }
+
+            startIdleTimer() {
+                this.clearIdleTimer();
+                this.idleTimer = setTimeout(() => {
+                    this.autoScrollEnabled = true;
+                    this.needsScroll = true;
+                    this.clearResumeTimer();
+                    this.scrollToBottom();
+                }, this.idleTimeout);
+            }
+
+            // 保障DOM池容量，避免可视窗口比池子大导致空白
+            ensurePoolCapacity(neededCount) {
+                if (!Number.isFinite(neededCount)) return;
+
+                // 根据需求量和基线计算DOM池大小，避免窗口比池子大
+                const baseline = Math.min(this.minPoolSize, neededCount + 80);
+                const targetSize = Math.min(
+                    Math.max(neededCount, baseline, this.pool.length),
+                    this.poolHardLimit
+                );
+
+                if (targetSize > this.maxPoolSize) {
+                    this.maxPoolSize = targetSize;
+                }
+
+                const missing = Math.max(0, targetSize - this.pool.length);
+                for (let i = 0; i < missing; i++) {
+                    const node = document.createElement('div');
+                    node.className = 'console-line';
+                    this.pool.push(node);
+                }
+            }
+
+            // DOM意外空白时强制刷新
+            forceRenderIfBlank() {
+                if (!this.container) return false;
+                if (this.lines.length === 0) return false;
+                if (this.container.querySelector('.console-line')) return false;
+                this.lastRenderHash = null;
+                this.needsScroll = true;
+                this.scheduleRender(true);
+                return true;
+            }
+
+            startWatchdog() {
+                if (this.watchdogTimer) return;
+                this.watchdogTimer = setInterval(() => {
+                    if (!this.container) return;
+                    // 黑屏兜底：有数据但没有节点时强制渲染
+                    const hasLines = this.lines.length > 0;
+                    const hasNodes = !!this.container.querySelector('.console-line');
+                    if (hasLines && !hasNodes && !this.isRendering) {
+                        this.lastRenderHash = null;
+                        this.needsScroll = true;
+                        this.updateStatusBar('正在恢复显示...', '检测到渲染延迟', false, 1200);
+                        this.scheduleRender(true);
+                        return;
+                    }
+
+                    // 渲染长时间未推进时，提醒并触发一次刷新
+                    const now = performance.now();
+                    if (hasLines && this.pending.length > 0 && now - this.lastRenderAt > 1500 && !this.isRendering) {
+                        this.lastRenderHash = null;
+                        this.needsScroll = true;
+                        this.updateStatusBar('日志渲染中...', `${this.pending.length} 条待显示`, false, 1200);
+                        this.scheduleRender(true);
+                    }
+                }, 800);
+            }
+
+            stopWatchdog() {
+                if (this.watchdogTimer) {
+                    clearInterval(this.watchdogTimer);
+                    this.watchdogTimer = null;
                 }
             }
 
@@ -1673,6 +1779,9 @@
 
                 // 显示状态栏
                 this.statusBar.classList.add('visible');
+                if (this.layoutCache) {
+                    this.layoutCache.invalidate();
+                }
 
                 // 清除之前的自动隐藏定时器
                 if (this.statusBarTimer) {
@@ -1685,6 +1794,9 @@
                     this.statusBarTimer = setTimeout(() => {
                         if (this.statusBar) {
                             this.statusBar.classList.remove('visible');
+                        }
+                        if (this.layoutCache) {
+                            this.layoutCache.invalidate();
                         }
                         this.statusBarTimer = null;
                     }, duration);
@@ -1699,6 +1811,9 @@
                     this.statusBarTimer = null;
                 }
                 this.statusBar.classList.remove('visible');
+                if (this.layoutCache) {
+                    this.layoutCache.invalidate();
+                }
             }
 
             // 添加清理方法
@@ -1707,6 +1822,7 @@
                 console.log('[性能统计] 最终统计:', this.getPerformanceStats());
 
                 // 清理定时器
+                this.stopWatchdog();
                 if (this.rafId) {
                     cancelAnimationFrame(this.rafId);
                     this.rafId = null;
@@ -1716,6 +1832,7 @@
                     clearTimeout(this.flushTimer);
                     this.flushTimer = null;
                 }
+                this.clearIdleTimer();
                 if (this.statusBarTimer) {
                     clearTimeout(this.statusBarTimer);
                     this.statusBarTimer = null;
@@ -1779,7 +1896,7 @@
 
                 // 计算距离底部的距离
                 const distanceFromBottom = scrollHeight - clientHeight - currentScrollTop;
-                const atBottom = distanceFromBottom <= 50;  // 50px阈值
+                const atBottom = distanceFromBottom <= 80;  // 更宽松的阈值，减少误判
 
                 if (atBottom) {
                     // 用户主动滚动到底部，立即启用自动滚动
@@ -1808,6 +1925,7 @@
                     this.clearResumeTimer();
                     const delay = this.calculateResumeDelay(distanceFromBottom);
                     this.startResumeTimer(delay);
+                    this.startIdleTimer();
                     return;
                 }
 
@@ -1815,10 +1933,12 @@
                 console.log(`[自动吸附] 用户离开底部 ${Math.round(distanceFromBottom)}px，禁用自动滚动`);
                 this.autoScrollEnabled = false;
                 this.clearResumeTimer();
+                this.clearIdleTimer();
 
                 // 智能计算恢复时间
                 const delay = this.calculateResumeDelay(distanceFromBottom);
                 this.startResumeTimer(delay);
+                this.startIdleTimer();
             }
 
             /**
@@ -1847,6 +1967,7 @@
                     console.log(`[自动吸附] ${delay}ms后恢复自动滚动，吸附到最新日志`);
                     this.autoScrollEnabled = true;
                     this.userScrollDistance = 0;
+                    this.needsScroll = true;
 
                     // 【优化】恢复时立即吸附到最新
                     // 如果有新内容已经渲染完成，直接滚动到最新位置
@@ -1891,10 +2012,11 @@
                 }
 
                 // 【优化判断】智能阈值：
-                // - 如果内容少（scrollHeight < 1000px），阈值30px（宽容）
-                // - 如果内容多，阈值50px（标准）
-                // 这样能更好地适应不同内容量的情况
-                const threshold = scrollHeight < 1000 ? 30 : 50;
+                // - 超小内容时使用30px
+                // - 常规50px
+                // - 当存在状态条/顶部padding时，再增加20px缓冲
+                const baseThreshold = scrollHeight < 1000 ? 30 : 50;
+                const threshold = baseThreshold + 20;
                 const distanceFromBottom = scrollHeight - clientHeight - scrollTop;
 
                 return distanceFromBottom <= threshold;
@@ -1915,8 +2037,41 @@
                 return this.isNearBottom();
             }
 
+            // 将最新一行吸附到可视区域内，而不是盲目对齐到底部
+            scrollLatestIntoView(margin = 12) {
+                if (!this.scrollElement || this.scrollLocked) return false;
+                const lastLine = this.scrollElement.querySelector('.console-line:last-of-type');
+                if (!lastLine) return false;
+
+                const container = this.scrollElement;
+                // 最新一行希望落在视口内并留出少量下边距
+                const desiredBottom = container.clientHeight - margin;
+                const delta = lastLine.offsetTop + lastLine.offsetHeight - desiredBottom;
+                if (delta > 1 || delta < -1) {
+                    this.scrollLocked = true;
+                    requestAnimationFrame(() => {
+                        container.scrollTop = Math.max(0, container.scrollTop + delta);
+                        if (this.layoutCache) {
+                            this.layoutCache.invalidate();
+                        }
+                        setTimeout(() => {
+                            this.scrollLocked = false;
+                        }, 80);
+                    });
+                }
+                return true;
+            }
+
             scrollToBottom() {
                 if (!this.scrollElement) return;
+
+                // 优先将最新一行吸附到视口内，保留边距，避免“对齐页面底部”的跳动
+                const snapped = this.scrollLatestIntoView(16);
+                if (snapped) {
+                    this.needsScroll = false;
+                    this.startIdleTimer();
+                    return;
+                }
 
                 // 【修复黑屏】如果正在渲染，延迟滚动避免冲突
                 if (this.isRendering) {
@@ -1989,6 +2144,7 @@
                                 }
                             }
                             this.needsScroll = false;
+                            this.startIdleTimer();
 
                             // 解锁滚动（平滑滚动需要更长时间）
                             setTimeout(() => {
@@ -2016,9 +2172,12 @@
                 this.isActive = active;
 
                 if (active) {
+                    this.startWatchdog();
+
                     // 【新增逻辑】切换引擎时，重置为自动吸附状态
                     // 默认用户鼠标未滑动3秒以上
                     this.autoScrollEnabled = true;
+                    this.needsScroll = true;
                     this.clearResumeTimer();
 
                     // 【修复】窗口激活时，清除渲染哈希，确保强制渲染
@@ -2112,6 +2271,17 @@
                             });
                         }
                     }
+
+                    // 保证切换后立即同步最新内容
+                    this.scheduleRender(true);
+                    this.startIdleTimer();
+
+                    if (this.lines.length > 0) {
+                        requestAnimationFrame(() => this.scrollToBottom());
+                    }
+                } else {
+                    this.stopWatchdog();
+                    this.clearIdleTimer();
                 }
             }
 
@@ -2179,12 +2349,25 @@
             }
 
             append(text, className = 'console-line') {
+                const nearBottom = this.isNearBottom();
+
                 // 在添加内容前检查是否在底部，如果是则标记需要滚动
-                if (this.autoScrollEnabled && this.isNearBottom()) {
+                if (this.autoScrollEnabled && nearBottom) {
                     this.needsScroll = true;
+                } else if (!this.autoScrollEnabled && nearBottom) {
+                    // 用户并未真正离开底部，自动恢复吸附
+                    this.autoScrollEnabled = true;
+                    this.needsScroll = true;
+                    this.clearResumeTimer();
                 }
 
                 this.pending.push({ text, className });
+                this.pendingHighWaterMark = Math.max(this.pendingHighWaterMark, this.pending.length);
+
+                // 队列堆积时给出进度提示（仅当前活动窗口）
+                if (this.isActive && this.pending.length > 150) {
+                    this.updateStatusBar('日志渲染中...', `${this.pending.length} 条排队`, false, 1200);
+                }
 
                 // 【修复黑屏】统一批处理逻辑 - 所有窗口都实时渲染
                 // 清除之前的定时器
@@ -2205,6 +2388,9 @@
                         this.scheduleRender();
                     }, this.batchDelay);
                 }
+
+                // 如果容器当前是空的，强制渲染一次，避免“黑屏等待”
+                this.forceRenderIfBlank();
 
                 this.maybeTrim();
             }
@@ -2332,6 +2518,7 @@
                         this.beforeSpacer = null;
                         this.afterSpacer = null;
                     }
+                    this.lastRenderAt = performance.now();
                     return;
                 }
 
@@ -2349,6 +2536,7 @@
                 }
                 this.lastRenderHash = contentHash;
                 this.lastRenderLineCount = total;
+                this.lastRenderAt = performance.now();
 
                 // 【优化】计算可见区域
                 const lh = this.lineHeight;
@@ -2374,14 +2562,33 @@
                 const bufferStart = Math.max(0, rawStart - this.preRenderBuffer);
                 const bufferEnd = Math.min(total, rawStart + visible + this.preRenderBuffer);
 
-                const start = bufferStart;
-                const end = bufferEnd;
+                let start = bufferStart;
+                let end = bufferEnd;
+                let needed = Math.max(0, end - start);
+
+                // 【修复白屏】先保证DOM池容量足够覆盖当前窗口
+                this.ensurePoolCapacity(needed);
+
+                // 如果窗口仍超过池容量，收缩窗口贴近最新日志，防止中间缺口
+                if (needed > this.pool.length) {
+                    const windowSize = this.pool.length || this.minPoolSize;
+                    end = Math.min(total, Math.max(end, windowSize));
+                    start = Math.max(0, end - windowSize);
+                    needed = Math.max(0, end - start);
+                }
+
+                if (needed === 0 && total > 0) {
+                    // 极端情况下兜底展示最新日志，避免空白
+                    end = total;
+                    start = Math.max(0, end - Math.min(this.maxVisible, total));
+                    needed = end - start;
+                    this.ensurePoolCapacity(needed);
+                }
+
                 const beforeHeight = start * lh;
                 const afterHeight = (total - end) * lh;
 
-                const needed = Math.max(0, end - start);
-
-                // 【优化】限制DOM节点池大小
+                // 【优化】限制DOM节点池大小（在更新池容量后执行）
                 if (this.pool.length > this.maxPoolSize) {
                     const excess = this.pool.length - this.maxPoolSize;
                     this.pool.splice(this.maxPoolSize, excess).forEach(node => {
@@ -2391,16 +2598,8 @@
                     });
                 }
 
-                // 【优化】批量创建DOM节点，减少DOM操作
-                const nodesToCreate = needed - this.pool.length;
-                if (nodesToCreate > 0 && this.pool.length < this.maxPoolSize) {
-                    const fragment = document.createDocumentFragment();
-                    for (let i = 0; i < Math.min(nodesToCreate, this.maxPoolSize - this.pool.length); i++) {
-                        const node = document.createElement('div');
-                        node.className = 'console-line';
-                        this.pool.push(node);
-                    }
-                }
+                // 再次兜底，确保池容量与窗口一致
+                this.ensurePoolCapacity(needed);
 
                 // 【优化】复用或创建占位符
                 if (!this.beforeSpacer) {
@@ -2479,6 +2678,8 @@
                                 this.scrollToBottom();
                             });
                         }
+
+                        this.lastRenderAt = performance.now();
                     });
                 } else {
                     // 【优化】增量更新：智能diff算法，只更新必要的节点
@@ -2579,6 +2780,8 @@
                         this.scrollToBottom();
                     });
                 }
+
+                this.lastRenderAt = performance.now();
             }
 
             /**
@@ -2607,6 +2810,7 @@
                 const batchSize = 200;  // 每批渲染200行
                 let currentBatch = 0;
                 const totalBatches = Math.ceil(total / batchSize);
+                this.lastRenderAt = performance.now();
 
                 // 显示渲染进度
                 const showProgress = () => {
@@ -2654,6 +2858,7 @@
 
                         // 隐藏状态栏
                         this.hideStatusBar();
+                        this.lastRenderAt = performance.now();
 
                         // 【优化吸附】渲染完成后的智能滚动
                         // 1. 自动滚动已启用 -> 直接吸附
@@ -2783,6 +2988,7 @@
         // 初始化
         document.addEventListener('DOMContentLoaded', function() {
             initializeConsoleLayers();
+            syncStatusBarPosition();
             initializeSocket();
             initializeEventListeners();
             ensureSystemReadyOnLoad();
@@ -2829,6 +3035,9 @@
 
             // 连接探测定时器（保持运行）
             startConnectionProbe();
+
+            // 窗口尺寸变化时同步状态栏位置
+            window.addEventListener('resize', syncStatusBarPosition);
         });
 
         // Socket.IO连接
@@ -3628,6 +3837,20 @@
             return document.getElementById('consoleOutput');
         }
 
+        // 同步状态栏位置，避免覆盖应用切换按钮
+        function syncStatusBarPosition() {
+            const bar = document.getElementById('consoleStatusBar');
+            const switcher = document.querySelector('.app-switcher');
+            if (!bar || !switcher) return;
+
+            const offset = switcher.offsetHeight || 0;
+            const barHeight = bar.offsetHeight || 26;
+            const totalOffset = offset + barHeight + 6; // 额外预留6px缓冲
+
+            bar.style.top = `${offset}px`;
+            document.documentElement.style.setProperty('--console-offset', `${totalOffset}px`);
+        }
+
         function initializeConsoleLayers() {
             const container = getConsoleContainer();
             if (!container) return;
@@ -3646,11 +3869,7 @@
                 container.appendChild(layer);
                 consoleLayers[app] = layer;
                 logRenderers[app] = new LogVirtualList(layer);
-
-                // 【图层优化】标记活动窗口
-                if (app === currentApp) {
-                    logRenderers[app].isActive = true;
-                }
+                logRenderers[app].setActive(app === currentApp);
 
                 // 【FIX Bug #3】初始提示立即渲染，避免黑屏
                 logRenderers[app].clear(`[系统] ${appNames[app] || app} 日志就绪`);
@@ -3680,11 +3899,7 @@
             container.appendChild(layer);
             consoleLayers[app] = layer;
             logRenderers[app] = new LogVirtualList(layer);
-
-            // 【图层优化】标记活动窗口
-            if (app === currentApp) {
-                logRenderers[app].isActive = true;
-            }
+            logRenderers[app].setActive(app === currentApp);
 
             return layer;
         }
@@ -3718,6 +3933,8 @@
             const renderer = logRenderers[app];
             if (renderer) {
                 renderer.setActive(true);  // 会在内部异步渲染待处理内容
+                renderer.needsScroll = true;
+                renderer.scheduleRender(true);
 
                 // 确保滚动到底部
                 if (renderer.autoScrollEnabled) {
@@ -4485,6 +4702,28 @@
         // 创建全局日志管理器实例
         const reportLogManager = new ReportLogManager();
 
+        // 新任务时重置报告日志，避免残留历史输出
+        function resetReportLogsForNewTask(taskId, reason = '开始新的报告任务，日志已重置') {
+            if (!taskId) return;
+            if (reportTaskId === taskId) return; // 已是同一任务，无需重复清空
+
+            // 停止当前流与轮询，防止旧日志混入
+            safeCloseReportStream();
+            reportLogManager.stop();
+            reportLogManager.reset();
+
+            // 重置前端计数与缓存
+            reportLogLineCount = 0;
+            lastLineCount['report'] = 0;
+
+            clearConsoleLayer('report', `[系统] ${reason}`);
+            resetReportStreamOutput('Report Engine 正在启动...');
+
+            // 重新启动轮询，确保新任务日志即时接入
+            reportLogManager.start();
+            reportTaskId = taskId;
+        }
+
         // 【调试】测试日志管理器
         window.testReportLogManager = function() {
             console.log('[测试] ===== 开始测试Report日志管理器 =====');
@@ -5025,12 +5264,14 @@
             if (statusData.current_task) {
                 updateTaskProgressStatus(statusData.current_task);
                 if (statusData.current_task.status === 'running') {
-                    reportTaskId = statusData.current_task.task_id;
+                    const taskId = statusData.current_task.task_id;
+                    resetReportLogsForNewTask(taskId, '检测到正在运行的报告任务，日志已重新开始');
+                    reportTaskId = taskId;
                     reportAutoPreviewLoaded = false;
                     if (window.EventSource) {
                         openReportStream(reportTaskId);
                     } else {
-                        startProgressPolling(reportTaskId);
+                        startProgressPolling(taskId);
                     }
                 } else if (statusData.current_task.status === 'completed') {
                     lastCompletedReportTask = statusData.current_task;
@@ -5527,6 +5768,9 @@
 
         // 更新进度显示（保持向后兼容）
         function updateProgressDisplay(task) {
+            if (task && task.task_id && task.status === 'running') {
+                resetReportLogsForNewTask(task.task_id, '检测到新的报告任务，日志已同步重置');
+            }
             updateTaskProgressStatus(task);
         }
 
@@ -5735,6 +5979,9 @@
             const task = payload.task;
 
             if (eventType === 'status' && task) {
+                if (task.status === 'running') {
+                    resetReportLogsForNewTask(task.task_id, '收到流式状态事件，已重置日志');
+                }
                 updateTaskProgressStatus(task);
                 reportTaskId = task.status === 'running' ? task.task_id : null;
                 if (task.status === 'completed') {
