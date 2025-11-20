@@ -3535,6 +3535,9 @@
             // 日志数据已通过Socket.IO/SSE实时同步，无需重新加载
             // 仅保留特殊页面的初始化逻辑
             if (app === 'report') {
+                // 【修复】切换到Report Engine时启动日志刷新
+                startReportLogRefresh();
+
                 // 只在报告界面未初始化时才重新加载
                 const reportContent = document.getElementById('reportContent');
                 if (!reportContent || reportContent.children.length === 0) {
@@ -3544,6 +3547,9 @@
                 setTimeout(() => {
                     checkReportLockStatus();
                 }, 500);
+            } else {
+                // 【修复】切换离开Report Engine时停止日志刷新，节省资源
+                stopReportLogRefresh();
             }
         }
 
@@ -4695,9 +4701,14 @@
                             appStatus.report = 'stopped';
                         }
                     }
-                    
+
                     // 渲染报告界面
                     renderReportInterface(data);
+
+                    // 【修复】加载Report界面时启动日志刷新
+                    if (currentApp === 'report') {
+                        startReportLogRefresh();
+                    }
                 } else {
                     reportContent.innerHTML = `
                         <div class="report-status error">
@@ -5101,7 +5112,10 @@
                 if (data.success) {
                     reportTaskId = data.task_id;
                     showMessage('报告生成已启动', 'success');
-                    
+
+                    // 【修复】立即启动日志实时刷新，确保日志实时显示
+                    startReportLogRefresh();
+
                     // 更新任务状态显示
                     updateTaskProgressStatus({
                         task_id: data.task_id,
@@ -5111,12 +5125,12 @@
                         created_at: new Date().toISOString(),
                         updated_at: new Date().toISOString()
                     });
-                    
+
                     // 立即刷新一次日志以确保同步
                     setTimeout(() => {
                         refreshReportLog();
                     }, 500);
-                    
+
                     appendReportStreamLine('任务创建成功，正在建立流式连接...', 'info', { force: true });
                     if (window.EventSource) {
                         openReportStream(reportTaskId);
@@ -5147,12 +5161,39 @@
             });
         }
 
+        // 【修复】启动Report Engine日志实时刷新
+        function startReportLogRefresh() {
+            // 清除旧的定时器
+            if (reportLogRefreshInterval) {
+                clearInterval(reportLogRefreshInterval);
+                reportLogRefreshInterval = null;
+            }
+
+            // 启动新的日志刷新定时器（1秒刷新一次，保证实时性）
+            reportLogRefreshInterval = setInterval(() => {
+                if (currentApp === 'report') {
+                    refreshReportLog();
+                }
+            }, 1000);  // 1秒刷新，确保日志实时显示
+
+            console.log('[Report日志] 启动实时日志刷新，频率: 1秒');
+        }
+
+        // 【修复】停止Report Engine日志刷新
+        function stopReportLogRefresh() {
+            if (reportLogRefreshInterval) {
+                clearInterval(reportLogRefreshInterval);
+                reportLogRefreshInterval = null;
+                console.log('[Report日志] 停止日志刷新');
+            }
+        }
+
         // 开始进度轮询
         function startProgressPolling(taskId) {
             if (reportPollingInterval) {
                 clearInterval(reportPollingInterval);
             }
-            
+
             reportPollingInterval = setInterval(() => {
                 checkTaskProgress(taskId);
             }, 2000);
