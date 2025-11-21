@@ -2562,6 +2562,7 @@
         // 切换应用
         function switchToApp(app) {
             if (app === currentApp) return;
+            const previousApp = currentApp;
 
             // 检查Report Engine是否被锁定
             if (app === 'report') {
@@ -2636,6 +2637,12 @@
             } else {
                 // 【修复】切换离开Report Engine时停止日志刷新，节省资源
                 reportLogManager.stop();
+
+                // 离开Report且无任务运行时，关闭SSE避免后台悬挂
+                if (previousApp === 'report' && !reportTaskId && reportEventSource) {
+                    safeCloseReportStream(true);
+                    stopProgressPolling();
+                }
             }
         }
 
