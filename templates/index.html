@@ -1379,6 +1379,12 @@
         const consoleLayers = {};
         let activeConsoleLayer = currentApp;
         const logRenderers = {};
+        const FORUM_SCROLL_REATTACH_DELAY = 3000;
+        const FORUM_SCROLL_BOTTOM_THRESHOLD = 60;
+        let forumMessagesCache = [];
+        let forumAutoScrollEnabled = true;
+        let forumScrollRestTimer = null;
+        let forumScrollHandlerAttached = false;
 
         // 页面可见性状态管理
         let isPageVisible = !document.hidden;
@@ -3685,6 +3691,69 @@ function getConsoleContainer() {
             console.log('[测试API] ===== 测试完成 =====');
         };
 
+        function attachForumScrollHandler() {
+            const chatArea = document.getElementById('forumChatArea');
+            if (!chatArea || forumScrollHandlerAttached) return;
+            forumScrollHandlerAttached = true;
+
+            chatArea.addEventListener('scroll', () => {
+                const nearBottom = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < FORUM_SCROLL_BOTTOM_THRESHOLD;
+
+                if (nearBottom) {
+                    forumAutoScrollEnabled = true;
+                    if (forumScrollRestTimer) {
+                        clearTimeout(forumScrollRestTimer);
+                        forumScrollRestTimer = null;
+                    }
+                } else {
+                    forumAutoScrollEnabled = false;
+                    if (forumScrollRestTimer) {
+                        clearTimeout(forumScrollRestTimer);
+                    }
+                    forumScrollRestTimer = setTimeout(() => {
+                        forumAutoScrollEnabled = true;
+                        scrollForumViewToBottom(true);
+                    }, FORUM_SCROLL_REATTACH_DELAY);
+                }
+            });
+        }
+
+        function applyForumMessages(parsedMessages, { reset = false } = {}) {
+            const chatArea = document.getElementById('forumChatArea');
+            if (!chatArea) return;
+
+            const incoming = parsedMessages || [];
+
+            // 文件被重置或主动要求刷新时清空
+            if (reset || incoming.length < forumMessagesCache.length) {
+                chatArea.innerHTML = '';
+                forumMessagesCache = [];
+            }
+
+            if (incoming.length === 0) {
+                forumMessagesCache = [];
+                return;
+            }
+
+            // 初次渲染或缓存为空
+            if (forumMessagesCache.length === 0) {
+                forumMessagesCache = incoming.slice();
+                incoming.forEach(msg => addForumMessage(msg, { suppressScroll: true }));
+                scrollForumViewToBottom(true);
+                return;
+            }
+
+            // 只追加新增的消息，避免滚动条跳动
+            if (incoming.length > forumMessagesCache.length) {
+                const newMessages = incoming.slice(forumMessagesCache.length);
+                forumMessagesCache = incoming.slice();
+                newMessages.forEach(msg => addForumMessage(msg, { suppressScroll: true }));
+                if (forumAutoScrollEnabled) {
+                    scrollForumViewToBottom();
+                }
+            }
+        }
+
         // 实时刷新论坛消息（适用于所有页面）
         function refreshForumMessages() {
             fetch('/api/forum/log')
@@ -3695,6 +3764,8 @@ function getConsoleContainer() {
                 const logLines = data.log_lines || [];
                 const parsedMessages = data.parsed_messages || [];
 
+                const logShrunk = logLines.length < forumLogLineCount || parsedMessages.length < forumMessagesCache.length;
+
                 if (logLines.length > forumLogLineCount) {
                     const newLines = logLines.slice(forumLogLineCount);
                     newLines.forEach(line => {
@@ -3702,15 +3773,7 @@ function getConsoleContainer() {
                     });
                 }
 
-                if (parsedMessages.length > 0) {
-                    const chatArea = document.getElementById('forumChatArea');
-                    if (chatArea) {
-                        chatArea.innerHTML = '';
-                        parsedMessages.forEach(message => {
-                            addForumMessage(message);
-                        });
-                    }
-                }
+                applyForumMessages(parsedMessages, { reset: logShrunk });
 
                 forumLogLineCount = logLines.length;
             })
@@ -3723,6 +3786,7 @@ function getConsoleContainer() {
         function initializeForum() {
             // 初始化时加载一次论坛日志
             refreshForumMessages();
+            attachForumScrollHandler();
         }
 
         // 加载论坛日志
@@ -3791,16 +3855,8 @@ function getConsoleContainer() {
                 .then(data => {
                     if (!data.success) return;
 
-                    const chatArea = document.getElementById('forumChatArea');
-                    if (chatArea) {
-                        chatArea.innerHTML = '';
-                    }
-
                     const parsedMessages = data.parsed_messages || [];
-                    if (parsedMessages.length > 0) {
-                        parsedMessages.forEach(message => addForumMessage(message));
-                    }
-
+                    applyForumMessages(parsedMessages, { reset: true });
                     forumLogLineCount = data.log_lines ? data.log_lines.length : 0;
                 });
             })
@@ -3826,19 +3882,14 @@ function getConsoleContainer() {
 
                 const logLines = data.log_lines || [];
                 const parsedMessages = data.parsed_messages || [];
+                const logShrunk = logLines.length < forumLogLineCount || parsedMessages.length < forumMessagesCache.length;
 
                 if (logLines.length > forumLogLineCount) {
                     const newLines = logLines.slice(forumLogLineCount);
                     newLines.forEach(line => appendConsoleTextLine('forum', line));
                 }
 
-                if (parsedMessages.length && parsedMessages.length !== getForumMessageCount()) {
-                    const chatArea = document.getElementById('forumChatArea');
-                    if (chatArea) {
-                        chatArea.innerHTML = '';
-                        parsedMessages.forEach(message => addForumMessage(message));
-                    }
-                }
+                applyForumMessages(parsedMessages, { reset: logShrunk });
 
                 forumLogLineCount = logLines.length;
             })
@@ -3992,8 +4043,10 @@ function getConsoleContainer() {
         }
 
         // 添加论坛消息到对话区
-        function addForumMessage(data) {
+        function addForumMessage(data, options = {}) {
+            const { prepend = false, suppressScroll = false } = options;
             const chatArea = document.getElementById('forumChatArea');
+            if (!chatArea) return;
             const messageDiv = document.createElement('div');
             
             const messageType = data.type || 'system';
@@ -4025,17 +4078,30 @@ function getConsoleContainer() {
                 <div class="forum-timestamp">${data.timestamp || new Date().toLocaleTimeString('zh-CN')}</div>
             `;
             
-            chatArea.appendChild(messageDiv);
+            if (prepend && chatArea.firstChild) {
+                chatArea.insertBefore(messageDiv, chatArea.firstChild);
+            } else {
+                chatArea.appendChild(messageDiv);
+            }
             
-            // 自动滚动到底部
-            chatArea.scrollTop = chatArea.scrollHeight;
+            // 自动滚动到底部（除非用户正在浏览历史）
+            if (!suppressScroll && forumAutoScrollEnabled) {
+                scrollForumViewToBottom();
+            }
         }
 
-        function scrollForumViewToBottom() {
+        function scrollForumViewToBottom(force = false) {
             const renderer = logRenderers['forum'];
             if (renderer) {
                 requestAnimationFrame(() => renderer.scrollToBottom());
             }
+
+            if (force) {
+                forumAutoScrollEnabled = true;
+            } else if (!forumAutoScrollEnabled) {
+                return;
+            }
+
             const chatArea = document.getElementById('forumChatArea');
             if (chatArea) {
                 requestAnimationFrame(() => {
