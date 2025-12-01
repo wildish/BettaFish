@@ -6,7 +6,8 @@
 **前置文档**: [DESIGN.md](./DESIGN.md) - 请先阅读设计方案  
 **适用阶段**: 开发实施阶段  
 **目标读者**: 开发工程师、技术架构师  
-**侧重点**: 技术细节、代码实现、开发规范
+**侧重点**: 技术细节、代码实现、开发规范  
+**实施策略**: 渐进式开发，优先 MVP（本文档主要针对 MVP 阶段）
 
 ---
 
@@ -287,7 +288,99 @@ CREATE TABLE IF NOT EXISTS analysis_reports (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分析报告缓存表';
 ```
 
-### 3.2 数据访问层代码实现
+### 3.2 数据库迁移策略
+
+**核心问题**: 如何从现有的舆情系统数据库迁移到金融系统？
+
+#### 策略1: 独立数据库（推荐 ⭐）
+
+```sql
+-- 创建新的金融分析数据库
+CREATE DATABASE finance_analysis CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE finance_analysis;
+
+-- 执行上述所有建表SQL
+-- ...
+```
+
+**优势**:
+- ✅ 不影响现有舆情系统
+- ✅ 可以并行开发和测试
+- ✅ 数据隔离，避免污染
+- ✅ 清晰的权限管理
+
+**劣势**:
+- ❌ 需要维护两个数据库
+- ❌ 无法复用部分基础表（如用户表）
+
+**适用场景**: MVP 阶段，快速验证
+
+---
+
+#### 策略2: 共享数据库
+
+```sql
+-- 在现有数据库中创建新表
+USE bettafish;
+
+-- 添加表前缀区分
+CREATE TABLE fin_trading_data ...
+CREATE TABLE fin_stock_basic_info ...
+CREATE TABLE fin_financial_data ...
+```
+
+**优势**:
+- ✅ 统一管理
+- ✅ 可以复用部分基础表（如用户表、配置表）
+- ✅ 减少数据库连接数
+
+**劣势**:
+- ❌ 表名冲突风险
+- ❌ 数据混杂，不易管理
+- ❌ 权限管理复杂
+
+**适用场景**: 生产阶段，系统整合
+
+---
+
+#### 推荐方案
+
+**MVP 阶段**: 使用策略1（独立数据库）
+```
+理由:
+1. 快速验证，不影响现有系统
+2. 如果 MVP 失败，可以直接删除数据库
+3. 数据隔离，避免误操作
+```
+
+**生产阶段**: 评估后决定是否合并
+```
+如果金融系统成为主要业务:
+  → 保持独立数据库
+  
+如果需要与舆情系统深度整合:
+  → 迁移到共享数据库（使用表前缀）
+```
+
+---
+
+#### 数据初始化
+
+```bash
+# 1. 创建数据库
+mysql -u root -p < database/schema/create_database.sql
+
+# 2. 创建表
+mysql -u root -p finance_analysis < database/schema/create_tables.sql
+
+# 3. 导入测试数据（可选）
+mysql -u root -p finance_analysis < database/seeds/test_data.sql
+```
+
+---
+
+### 3.3 数据访问层代码实现
 
 ```python
 # data_access/data_manager.py
@@ -495,6 +588,63 @@ class TechnicalIndicatorCalculator:
         
         return round(rsi.iloc[-1], 2)
     
+    def calculate_bollinger_bands(self, df: pd.DataFrame, period: int = 20, std_dev: int = 2) -> Dict:
+        """计算布林带"""
+        close = df['close']
+        
+        middle = close.rolling(window=period).mean()
+        std = close.rolling(window=period).std()
+        
+        upper = middle + (std_dev * std)
+        lower = middle - (std_dev * std)
+        
+        return {
+            'boll_upper': round(upper.iloc[-1], 2),
+            'boll_mid': round(middle.iloc[-1], 2),
+            'boll_lower': round(lower.iloc[-1], 2)
+        }
+    
+    def calculate_obv(self, df: pd.DataFrame) -> float:
+        """计算能量潮（On Balance Volume）"""
+        obv = 0
+        obv_list = []
+        
+        for i in range(len(df)):
+            if i == 0:
+                obv_list.append(df['volume'].iloc[i])
+            else:
+                if df['close'].iloc[i] > df['close'].iloc[i-1]:
+                    obv += df['volume'].iloc[i]
+                elif df['close'].iloc[i] < df['close'].iloc[i-1]:
+                    obv -= df['volume'].iloc[i]
+                obv_list.append(obv)
+        
+        return round(obv_list[-1], 2)
+    
+    def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """计算平均真实波幅（Average True Range）"""
+        high_low = df['high'] - df['low']
+        high_close = abs(df['high'] - df['close'].shift())
+        low_close = abs(df['low'] - df['close'].shift())
+        
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        
+        return round(atr.iloc[-1], 2)
+    
+    def calculate_volume_ratio(self, df: pd.DataFrame, period: int = 5) -> float:
+        """计算量比"""
+        if len(df) < period + 1:
+            return 1.0
+        
+        current_volume = df['volume'].iloc[-1]
+        avg_volume = df['volume'].iloc[-period-1:-1].mean()
+        
+        if avg_volume == 0:
+            return 1.0
+        
+        return round(current_volume / avg_volume, 2)
+    
     def calculate_all_indicators(self, stock_code: str, trade_date: str) -> Dict:
         """
         计算指定日期的所有技术指标
@@ -522,6 +672,12 @@ class TechnicalIndicatorCalculator:
         indicators.update(self.calculate_macd(df))
         indicators.update(self.calculate_kdj(df))
         indicators['rsi_14'] = self.calculate_rsi(df, 14)
+        
+        # MVP 阶段可选指标（优化阶段再添加）
+        # indicators.update(self.calculate_bollinger_bands(df))
+        # indicators['obv'] = self.calculate_obv(df)
+        # indicators['atr'] = self.calculate_atr(df)
+        # indicators['volume_ratio'] = self.calculate_volume_ratio(df)
         
         return indicators
     
@@ -579,6 +735,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from typing import List, Dict
 from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 class AnnouncementParser:
     """
@@ -594,9 +751,14 @@ class AnnouncementParser:
         self.szse_url = 'http://www.szse.cn/api/disc/announcement/annList'  # 深交所
         self.sse_url = 'http://query.sse.com.cn/security/stock/getStockAnnouncementList'  # 上交所
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True
+    )
     def fetch_announcements(self, stock_code: str, days: int = 30) -> List[Dict]:
         """
-        获取指定股票的公告
+        获取指定股票的公告（带重试机制）
         
         Args:
             stock_code: 股票代码
@@ -635,6 +797,7 @@ class AnnouncementParser:
         
         try:
             response = requests.get(self.szse_url, params=params, headers=self.headers, timeout=10)
+            response.raise_for_status()  # 检查HTTP状态码
             data = response.json()
             
             announcements = []
@@ -650,8 +813,14 @@ class AnnouncementParser:
             logger.info(f"获取深交所公告: {stock_code}, 共{len(announcements)}条")
             return announcements
             
+        except requests.RequestException as e:
+            logger.error(f"网络请求失败: {e}")
+            raise  # 重新抛出异常，触发重试
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(f"数据解析失败: {e}")
+            return []  # 数据格式错误，返回空列表而非重试
         except Exception as e:
-            logger.error(f"获取深交所公告失败: {e}")
+            logger.error(f"未知错误: {e}")
             return []
     
     def _fetch_sse_announcements(self, stock_code: str, days: int) -> List[Dict]:
@@ -1198,9 +1367,118 @@ FORUM_HOST_USER_PROMPT = """
 
 ---
 
-## 七、待补充的技术细节
+## 七、MVP 开发清单 ⭐ 核心章节
 
-### 7.1 需要进一步讨论的问题
+### 7.1 MVP 阶段任务清单（1-2个月）
+
+#### Week 1: 数据层搭建
+- [ ] 创建独立数据库 `finance_analysis`
+- [ ] 执行建表SQL（trading_data, stock_basic_info, financial_data等）
+- [ ] 实现 `MarketDataSource` 类（对接用户现有数据库）
+- [ ] 实现 `TechnicalIndicatorCalculator` 类（MA、MACD、KDJ、RSI）
+- [ ] 数据质量验证机制
+- [ ] 单元测试（数据访问层）
+
+#### Week 2: MessageEngine 改造
+- [ ] 创建 `MessageEngine/` 目录结构
+- [ ] 实现 `AnnouncementParser`（简化版，只爬取深交所）
+- [ ] 实现 `FinancialNewsCrawler`（简化版，只爬取新浪财经）
+- [ ] 改造 Prompt 为金融场景（`MESSAGE_ANALYSIS_PROMPT`）
+- [ ] 保留现有 Agent 架构（不引入 LangGraph）
+- [ ] 单元测试（工具集）
+
+#### Week 3: MarketEngine 改造
+- [ ] 创建 `MarketEngine/` 目录结构
+- [ ] 实现 `TechnicalCalculator`（调用 TechnicalIndicatorCalculator）
+- [ ] 实现 K线形态识别（简化版，只识别3-5种形态）
+- [ ] 改造 Prompt 为技术分析场景（`TECHNICAL_ANALYSIS_PROMPT`）
+- [ ] 单元测试（工具集）
+
+#### Week 4: StrategyEngine 改造
+- [ ] 创建 `StrategyEngine/` 目录结构
+- [ ] 实现 `HistoricalAnalyzer`（简化版，只分析基本面）
+- [ ] 实现 `QuantitativeScorer`（基本面评分）
+- [ ] 改造 Prompt 为量化分析场景（`QUANTITATIVE_ANALYSIS_PROMPT`）
+- [ ] 单元测试（工具集）
+
+#### Week 5: 检索优化
+- [ ] 创建金融领域同义词词典（100-200个）
+  - 股票名称同义词（如"茅台"="贵州茅台"）
+  - 行业术语同义词（如"新能源车"="电动汽车"）
+- [ ] 增强 `KeywordOptimizer`
+  - 集成同义词词典
+  - 使用 jieba + 自定义词典进行实体识别
+  - 关键词扩展从 10-20个 增加到 30-50个
+- [ ] 多字段搜索实现
+- [ ] 召回率测试（手动抽样验证）
+
+#### Week 6: ForumEngine 适配
+- [ ] 更新主持人 Prompt（`FORUM_HOST_SYSTEM_PROMPT`）
+- [ ] 测试三个 Agent 的协作效果
+- [ ] 调优论坛讨论逻辑
+
+#### Week 7: ReportEngine 改造
+- [ ] 创建金融分析报告模板
+  - 个股深度分析模板
+  - 题材分析模板（可选）
+- [ ] 集成三个 Agent 的分析结果
+- [ ] 生成 HTML 格式报告
+- [ ] 报告样式优化
+
+#### Week 8: 集成测试与优化
+- [ ] 端到端测试（完整分析流程）
+- [ ] 性能测试（响应时间 < 60秒）
+- [ ] Bug 修复
+- [ ] 文档完善（README、API文档）
+- [ ] 部署准备
+
+### 7.2 MVP 验收标准
+
+**功能验收**:
+- ✅ 能够分析单只股票（输入股票代码，输出分析报告）
+- ✅ 报告包含三个维度：基本面、技术面、消息面
+- ✅ 报告包含投资建议（评级、目标价、风险提示）
+- ✅ 生成 HTML 格式报告（可读性好）
+
+**性能验收**:
+- ✅ 响应时间 < 60秒（单只股票分析）
+- ✅ 召回率 > 75%（手动抽样验证20个查询）
+- ✅ 无重大 Bug（核心流程无崩溃）
+
+**代码质量**:
+- ✅ 单元测试覆盖率 > 60%（MVP 阶段可适当降低要求）
+- ✅ 代码符合 PEP 8 规范
+- ✅ 关键函数有 Docstring
+
+### 7.3 MVP 成功标准
+
+**最低标准**（必须达到）:
+- 能够完成单只股票的分析
+- 生成的报告有参考价值（不是胡言乱语）
+- 系统稳定运行（不频繁崩溃）
+
+**理想标准**（努力达到）:
+- 分析质量接近人工分析师水平
+- 响应时间 < 30秒
+- 召回率 > 80%
+
+### 7.4 MVP 之后的决策点
+
+**如果 MVP 成功**:
+→ 进入优化阶段（引入向量检索、置信度管理）
+
+**如果 MVP 失败**:
+→ 分析失败原因
+  - 数据质量问题？→ 改进数据源
+  - LLM 能力不足？→ 更换模型或优化 Prompt
+  - 架构设计问题？→ 重新设计
+  - 需求不明确？→ 重新调研
+
+---
+
+## 八、待补充的技术细节
+
+### 8.1 需要进一步讨论的问题
 
 1. **实时行情接口对接**
    - 用户是否有实时行情API？
@@ -1229,6 +1507,11 @@ FORUM_HOST_USER_PROMPT = """
 
 ---
 
-**文档版本**: v1.0  
-**最后更新**: 2024-11-06  
-**状态**: 待完善
+**文档版本**: v2.0  
+**最后更新**: 2024-12-01  
+**状态**: 已调整为渐进式开发策略（优先 MVP）  
+**主要变更**: 
+- 新增数据库迁移策略
+- 补充技术指标计算器（布林带、OBV、ATR、量比）
+- 添加错误处理和重试机制
+- 新增 MVP 开发清单（8周任务分解）
