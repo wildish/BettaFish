@@ -2,11 +2,17 @@
 
 ## 文档说明
 
-**文档版本**: v3.0 Final  
+**文档版本**: v4.0 Final  
 **创建日期**: 2025-12-02  
+**最后更新**: 2025-12-02  
 **文档类型**: 设计 + 实施计划（一体化）  
 **目标读者**: 开发工程师  
 **实施策略**: 渐进式开发，MVP 优先（1-2个月上线）
+
+**核心特性**:  
+✅ 因子开发平台化（可扩展）  
+✅ 异步任务处理（高并发）  
+✅ 标准化因子接口（易维护）
 
 ---
 
@@ -15,15 +21,22 @@
 ### 1.1 系统定位
 
 ```
-BettaFish = 金融消息因子生成器
+BettaFish = 金融消息因子开发平台 ⭐
 
 核心能力：
 ├─ 多源消息获取（新闻、公告、舆情）
 ├─ 智能消息分析（LLM + Agent 协作）
-└─ 标准化因子输出（量化信号）
+├─ 标准化因子输出（量化信号）
+└─ 因子快速开发（平台化能力）
 
 输出产物：
 └─ 消息因子（可直接用于量化策略）
+
+平台特性：
+├─ 因子标准化接口（BaseFactor）
+├─ 因子注册机制（FactorRegistry）
+├─ 因子计算引擎（FactorEngine）
+└─ 异步任务处理（Celery + Redis）
 ```
 
 **与现有系统的关系**：
@@ -142,7 +155,146 @@ BettaFish 负责：
 
 ---
 
-### 2.2 数据流向
+### 2.2 异步任务架构 ⭐
+
+**核心设计**：消息因子生成流程耗时较长（20-60秒/只股票），必须采用异步处理架构以支持高并发和批量处理。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  异步任务处理架构                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌──────────────┐         ┌──────────────┐                 │
+│  │  Flask API   │────────▶│ Task Queue   │                 │
+│  │  (接收请求)   │  提交   │   (Redis)    │                 │
+│  │              │  任务   │              │                 │
+│  │  - POST /analyze       │  - 任务队列   │                 │
+│  │  - GET /status         │  - 结果缓存   │                 │
+│  │  - GET /result         │  - 进度跟踪   │                 │
+│  └──────────────┘         └──────┬───────┘                 │
+│         ▲                        │                         │
+│         │ 查询状态                │ 分发任务                 │
+│         │                        ▼                         │
+│  ┌────────────────────────────────────────────┐            │
+│  │         Celery Workers (多进程)             │            │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐ │            │
+│  │  │ Worker 1 │  │ Worker 2 │  │ Worker 3 │ │            │
+│  │  │          │  │          │  │          │ │            │
+│  │  │ 处理中   │  │ 空闲     │  │ 处理中   │ │            │
+│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘ │            │
+│  └───────┼─────────────┼─────────────┼────────┘            │
+│          │             │             │                     │
+│          ▼             ▼             ▼                     │
+│  ┌──────────────────────────────────────────┐              │
+│  │  消息获取 → 分析 → 因子计算 → 存储       │              │
+│  │  (20-60秒/只股票)                        │              │
+│  └──────────────────┬───────────────────────┘              │
+│                     ▼                                      │
+│  ┌──────────────────────────────────────────┐              │
+│  │      PostgreSQL (结果持久化)              │              │
+│  └──────────────────────────────────────────┘              │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**核心组件**：
+- **Celery**: 分布式任务队列框架
+- **Redis**: 消息队列 + 结果缓存 + 进度跟踪
+- **PostgreSQL**: 持久化存储
+- **Flask API**: RESTful接口
+
+**关键特性**：
+```
+✅ 异步提交：API立即返回task_id，不阻塞
+✅ 进度跟踪：实时查询任务进度（0-100%）
+✅ 并发处理：多Worker并行处理任务
+✅ 批量分析：支持批量提交（100+股票）
+✅ 失败重试：自动重试机制
+✅ 超时控制：任务超时自动终止
+```
+
+---
+
+### 2.3 因子平台架构 ⭐
+
+**核心设计**：将因子开发平台化，支持快速开发和迭代新因子。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    因子开发平台                              │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌────────────────── 因子基类 ──────────────────┐          │
+│  │                                                │          │
+│  │  class BaseFactor(ABC):                       │          │
+│  │      name: str                                │          │
+│  │      version: str                             │          │
+│  │      category: str                            │          │
+│  │      output_range: tuple                      │          │
+│  │                                                │          │
+│  │      @abstractmethod                          │          │
+│  │      def calculate(analysis) -> float         │          │
+│  │                                                │          │
+│  └────────────────────┬───────────────────────────┘          │
+│                       │ 继承                                 │
+│                       ▼                                      │
+│  ┌────────────────────────────────────────────────┐         │
+│  │              内置因子（MVP阶段）                │         │
+│  │  ┌──────────────┐  ┌──────────────┐           │         │
+│  │  │SentimentFactor│  │EventImpactFactor│        │         │
+│  │  └──────────────┘  └──────────────┘           │         │
+│  │  ┌──────────────┐  ┌──────────────┐           │         │
+│  │  │ConceptHeatFactor│ │OpinionFactor│          │         │
+│  │  └──────────────┘  └──────────────┘           │         │
+│  │  ┌──────────────┐  ┌──────────────┐           │         │
+│  │  │TimelinessFactor│ │CompositeFactor│         │         │
+│  │  └──────────────┘  └──────────────┘           │         │
+│  └────────────────────┬───────────────────────────┘         │
+│                       │ 注册                                 │
+│                       ▼                                      │
+│  ┌────────────────────────────────────────────────┐         │
+│  │           FactorRegistry (注册中心)             │         │
+│  │  - register(factor_class)                      │         │
+│  │  - get_factor(name)                            │         │
+│  │  - list_factors(category)                      │         │
+│  │  - get_metadata()                              │         │
+│  └────────────────────┬───────────────────────────┘         │
+│                       │ 使用                                 │
+│                       ▼                                      │
+│  ┌────────────────────────────────────────────────┐         │
+│  │           FactorEngine (计算引擎)               │         │
+│  │  - calculate_all(analysis)                     │         │
+│  │  - calculate_composite(factors, weights)       │         │
+│  │  - parallel_calculate() [并发计算]             │         │
+│  └────────────────────────────────────────────────┘         │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**平台价值**：
+```
+对开发者：
+✅ 标准化接口 → 降低开发难度
+✅ 即插即用 → 快速迭代（1-2天上线新因子）
+✅ 自动测试 → 保证质量
+✅ 版本管理 → 可追溯
+
+对业务：
+✅ 快速响应需求 → 新因子快速上线
+✅ A/B测试 → 多版本因子对比
+✅ 灵活组合 → 不同策略使用不同因子组合
+✅ 持续优化 → 因子迭代不影响系统稳定性
+
+对系统：
+✅ 松耦合 → 因子独立，互不影响
+✅ 可扩展 → 无限扩展因子数量
+✅ 可维护 → 每个因子独立维护
+✅ 可监控 → 每个因子独立监控性能
+```
+
+---
+
+### 2.4 数据流向
 
 ```
 1. 消息获取
@@ -906,7 +1058,435 @@ class MessageFactorGenerator:
 
 ---
 
-### 5.6 Week 5: 完整流程集成（5-7天）
+### 5.6 Week 5: 异步架构实现 ⭐（5-7天）
+
+**任务清单**:
+- [ ] 环境搭建
+  - [ ] 安装 Redis
+  - [ ] 安装 Celery
+  - [ ] 配置 Celery Worker
+- [ ] 核心任务定义
+  - [ ] `analyze_stock_async()` - 异步分析单只股票
+  - [ ] `batch_analyze_stocks()` - 批量分析
+  - [ ] `scheduled_factor_update()` - 定时更新
+- [ ] API接口实现
+  - [ ] `POST /api/factor/analyze` - 提交任务
+  - [ ] `GET /api/factor/status/<task_id>` - 查询状态
+  - [ ] `GET /api/factor/result/<task_id>` - 获取结果
+  - [ ] `POST /api/factor/batch` - 批量提交
+  - [ ] `POST /api/factor/cancel/<task_id>` - 取消任务
+- [ ] 进度跟踪机制
+  - [ ] 实现 `FactorTask` 基类
+  - [ ] 实现 `update_progress()` 方法
+  - [ ] 状态管理（PENDING/PROGRESS/SUCCESS/FAILURE）
+- [ ] 测试
+  - [ ] 单任务测试
+  - [ ] 批量任务测试
+  - [ ] 并发测试（10+任务）
+  - [ ] 失败重试测试
+
+**代码框架**:
+
+```python
+# tasks/factor_tasks.py
+
+from celery import Celery, Task
+from celery.result import AsyncResult
+
+# 初始化Celery
+celery_app = Celery(
+    'bettafish',
+    broker='redis://localhost:6379/0',
+    backend='redis://localhost:6379/1'
+)
+
+# 配置
+celery_app.conf.update(
+    task_serializer='json',
+    accept_content=['json'],
+    result_serializer='json',
+    timezone='Asia/Shanghai',
+    task_track_started=True,
+    task_time_limit=300,  # 5分钟超时
+    worker_prefetch_multiplier=1,
+    worker_max_tasks_per_child=50
+)
+
+
+class FactorTask(Task):
+    """因子任务基类 - 支持进度跟踪"""
+    
+    def update_progress(self, current, total, message=''):
+        """更新任务进度"""
+        self.update_state(
+            state='PROGRESS',
+            meta={
+                'current': current,
+                'total': total,
+                'message': message,
+                'percent': int(current / total * 100)
+            }
+        )
+
+
+@celery_app.task(base=FactorTask, bind=True, name='tasks.analyze_stock')
+def analyze_stock_async(self, stock_code: str, days: int = 30):
+    """
+    异步分析股票消息并生成因子
+    """
+    try:
+        # Step 1: 消息获取 (0-30%)
+        self.update_progress(0, 100, f'开始获取 {stock_code} 的消息...')
+        messages = fetch_messages(stock_code, days)
+        self.update_progress(30, 100, f'获取到 {len(messages)} 条消息')
+        
+        # Step 2: 消息分析 (30-80%)
+        self.update_progress(30, 100, '开始分析消息...')
+        analyzed_results = []
+        for i, msg in enumerate(messages):
+            analysis = analyze_message(msg)
+            analyzed_results.append(analysis)
+            progress = 30 + int((i + 1) / len(messages) * 50)
+            self.update_progress(progress, 100, f'分析进度: {i+1}/{len(messages)}')
+        
+        # Step 3: 因子计算 (80-95%)
+        self.update_progress(80, 100, '开始生成因子...')
+        factors_list = []
+        for i, analysis in enumerate(analyzed_results):
+            factors = engine.calculate_all(analysis)
+            save_factors_to_db(stock_code, factors)
+            factors_list.append(factors)
+            progress = 80 + int((i + 1) / len(analyzed_results) * 15)
+            self.update_progress(progress, 100, f'因子生成: {i+1}/{len(analyzed_results)}')
+        
+        # Step 4: 生成汇总 (95-100%)
+        self.update_progress(95, 100, '生成分析报告...')
+        summary = generate_summary(stock_code, analyzed_results, factors_list)
+        self.update_progress(100, 100, '分析完成')
+        
+        return {
+            'stock_code': stock_code,
+            'message_count': len(messages),
+            'factor_count': len(factors_list),
+            'summary': summary,
+            'status': 'success'
+        }
+        
+    except Exception as e:
+        self.update_state(state='FAILURE', meta={'error': str(e)})
+        raise
+
+
+@celery_app.task(name='tasks.batch_analyze')
+def batch_analyze_stocks(stock_codes: list, days: int = 30):
+    """批量分析股票（并发执行）"""
+    from celery import group
+    
+    job = group(analyze_stock_async.s(code, days) for code in stock_codes)
+    result = job.apply_async()
+    
+    return {
+        'task_ids': [r.id for r in result.results],
+        'total': len(stock_codes)
+    }
+```
+
+```python
+# api/factor_api.py
+
+from flask import Blueprint, request, jsonify
+from celery.result import AsyncResult
+from tasks.factor_tasks import analyze_stock_async, batch_analyze_stocks
+
+factor_bp = Blueprint('factor', __name__, url_prefix='/api/factor')
+
+
+@factor_bp.route('/analyze', methods=['POST'])
+def submit_analysis():
+    """提交分析任务"""
+    data = request.json
+    stock_code = data.get('stock_code')
+    days = data.get('days', 30)
+    
+    if not stock_code:
+        return jsonify({'error': 'stock_code is required'}), 400
+    
+    # 提交异步任务
+    task = analyze_stock_async.apply_async(args=[stock_code, days])
+    
+    return jsonify({
+        'task_id': task.id,
+        'status': 'pending',
+        'message': f'任务已提交: {stock_code}'
+    }), 202
+
+
+@factor_bp.route('/status/<task_id>', methods=['GET'])
+def get_task_status(task_id):
+    """查询任务状态"""
+    task = AsyncResult(task_id)
+    
+    if task.state == 'PENDING':
+        response = {'task_id': task_id, 'state': 'PENDING', 'message': '任务等待中...'}
+    elif task.state == 'PROGRESS':
+        response = {'task_id': task_id, 'state': 'PROGRESS', **task.info}
+    elif task.state == 'SUCCESS':
+        response = {'task_id': task_id, 'state': 'SUCCESS', 'result': task.result}
+    elif task.state == 'FAILURE':
+        response = {'task_id': task_id, 'state': 'FAILURE', 'error': str(task.info)}
+    else:
+        response = {'task_id': task_id, 'state': task.state}
+    
+    return jsonify(response)
+
+
+@factor_bp.route('/batch', methods=['POST'])
+def submit_batch_analysis():
+    """批量分析"""
+    data = request.json
+    stock_codes = data.get('stock_codes', [])
+    days = data.get('days', 30)
+    
+    if not stock_codes:
+        return jsonify({'error': 'stock_codes is required'}), 400
+    
+    result = batch_analyze_stocks.apply_async(args=[stock_codes, days])
+    
+    return jsonify({
+        'batch_task_id': result.id,
+        'total': len(stock_codes),
+        'message': f'批量任务已提交: {len(stock_codes)}只股票'
+    }), 202
+```
+
+**验收标准**:
+- ✅ 异步任务提交成功，API立即返回（< 100ms）
+- ✅ 进度跟踪准确（0-100%）
+- ✅ 支持并发处理（10+任务同时运行）
+- ✅ 批量分析功能正常
+- ✅ 任务失败自动重试
+- ✅ 超时任务自动终止
+
+---
+
+### 5.7 Week 6: 因子平台实现 ⭐（5-7天）
+
+**任务清单**:
+- [ ] 因子基类实现
+  - [ ] `BaseFactor` 抽象类
+  - [ ] 元数据管理（name, version, category, output_range）
+  - [ ] `calculate()` 抽象方法
+  - [ ] `validate()` 验证方法
+- [ ] 因子注册中心
+  - [ ] `FactorRegistry` 类
+  - [ ] `register()` 注册方法
+  - [ ] `get_factor()` 获取方法
+  - [ ] `list_factors()` 列表方法
+- [ ] 因子计算引擎
+  - [ ] `FactorEngine` 类
+  - [ ] `calculate_all()` 批量计算
+  - [ ] `calculate_composite()` 综合因子
+  - [ ] 并发计算支持
+- [ ] 内置因子实现
+  - [ ] `SentimentFactor` - 情感因子
+  - [ ] `EventImpactFactor` - 事件因子
+  - [ ] `ConceptHeatFactor` - 题材因子
+  - [ ] `PublicOpinionFactor` - 舆情因子
+  - [ ] `TimelinessFactor` - 时效因子
+  - [ ] `CompositeFactor` - 综合因子
+- [ ] 因子测试框架
+  - [ ] `FactorTester` 类
+  - [ ] 基础测试（元数据、接口）
+  - [ ] 边界测试
+  - [ ] 性能测试（< 1ms/次）
+
+**代码框架**:
+
+```python
+# factor_engine/base_factor.py
+
+from abc import ABC, abstractmethod
+from typing import Dict, Any
+
+class BaseFactor(ABC):
+    """
+    因子基类 - 所有因子必须继承此类
+    """
+    
+    # 因子元数据
+    name: str = ""
+    version: str = "1.0.0"
+    category: str = ""
+    output_range: tuple = (0, 1)
+    
+    @abstractmethod
+    def calculate(self, analysis: Dict[str, Any]) -> float:
+        """
+        因子计算逻辑
+        
+        Args:
+            analysis: 消息分析结果
+            
+        Returns:
+            float: 因子值
+        """
+        pass
+    
+    def validate(self, value: float) -> bool:
+        """验证因子值是否在合理范围内"""
+        min_val, max_val = self.output_range
+        return min_val <= value <= max_val
+    
+    def get_metadata(self) -> Dict:
+        """获取因子元数据"""
+        return {
+            'name': self.name,
+            'version': self.version,
+            'category': self.category,
+            'output_range': self.output_range,
+            'description': self.__doc__
+        }
+```
+
+```python
+# factor_engine/factors/sentiment_factor.py
+
+from factor_engine.base_factor import BaseFactor
+
+class SentimentFactor(BaseFactor):
+    """
+    情感因子：量化消息的情感倾向
+    """
+    
+    name = "sentiment_factor"
+    version = "1.0.0"
+    category = "sentiment"
+    output_range = (-1, 1)
+    
+    def calculate(self, analysis: Dict[str, Any]) -> float:
+        sentiment = analysis.get('sentiment', 'neutral')
+        impact_level = analysis.get('impact_level', 'normal')
+        confidence = analysis.get('confidence_score', 0.8)
+        
+        # 基础分数
+        base_score = {
+            'positive': 0.7,
+            'neutral': 0.0,
+            'negative': -0.7
+        }.get(sentiment, 0.0)
+        
+        # 影响程度调整
+        impact_multiplier = {
+            'major': 1.3,
+            'normal': 1.0,
+            'minor': 0.7
+        }.get(impact_level, 1.0)
+        
+        # 最终分数
+        final_score = base_score * impact_multiplier * confidence
+        
+        # 限制范围
+        return max(-1.0, min(1.0, final_score))
+```
+
+```python
+# factor_engine/factor_registry.py
+
+class FactorRegistry:
+    """因子注册中心"""
+    
+    def __init__(self):
+        self.factors = {}
+        self.factor_groups = {}
+    
+    def register(self, factor_class: type):
+        """注册因子"""
+        factor = factor_class()
+        
+        if not isinstance(factor, BaseFactor):
+            raise ValueError(f"{factor_class} must inherit from BaseFactor")
+        
+        if factor.name in self.factors:
+            raise ValueError(f"Factor {factor.name} already registered")
+        
+        self.factors[factor.name] = factor
+        
+        # 分组管理
+        category = factor.category
+        if category not in self.factor_groups:
+            self.factor_groups[category] = []
+        self.factor_groups[category].append(factor.name)
+        
+        print(f"✅ Registered factor: {factor.name} v{factor.version}")
+    
+    def get_factor(self, name: str) -> BaseFactor:
+        """获取因子"""
+        return self.factors.get(name)
+    
+    def list_factors(self, category: str = None) -> list:
+        """列出因子"""
+        if category:
+            return self.factor_groups.get(category, [])
+        return list(self.factors.keys())
+
+
+# 全局注册中心
+_global_registry = FactorRegistry()
+
+def get_registry() -> FactorRegistry:
+    """获取全局注册中心"""
+    return _global_registry
+```
+
+```python
+# factor_engine/factor_engine.py
+
+class FactorEngine:
+    """因子计算引擎"""
+    
+    def __init__(self, registry: FactorRegistry):
+        self.registry = registry
+    
+    def calculate_all(self, analysis: Dict[str, Any], 
+                     enabled_factors: list = None) -> Dict[str, float]:
+        """计算所有因子"""
+        factors = {}
+        
+        if enabled_factors is None:
+            enabled_factors = self.registry.list_factors()
+        
+        for factor_name in enabled_factors:
+            factor = self.registry.get_factor(factor_name)
+            
+            if factor is None:
+                continue
+            
+            try:
+                value = factor.calculate(analysis)
+                
+                if not factor.validate(value):
+                    logger.warning(f"Factor {factor_name} value {value} out of range")
+                
+                factors[factor_name] = value
+                
+            except Exception as e:
+                logger.error(f"Error calculating {factor_name}: {e}")
+                factors[factor_name] = None
+        
+        return factors
+```
+
+**验收标准**:
+- ✅ 因子基类接口完整
+- ✅ 6个内置因子实现正确
+- ✅ 因子注册机制正常工作
+- ✅ 因子计算引擎性能达标（< 1ms/因子）
+- ✅ 新增因子只需3步（定义、注册、生效）
+- ✅ 单元测试覆盖率 > 90%
+
+---
+
+### 5.8 Week 7: 完整流程集成（5-7天）
 
 **任务清单**:
 - [ ] 实现完整的消息处理流程
@@ -1125,14 +1705,17 @@ class ConceptHeatCalculator:
 | API | Tavily API | - | 新闻搜索 |
 | API | Bocha API | - | 多模态搜索 |
 
-### 6.2 新增的技术栈
+### 6.2 新增的技术栈 ⭐
 
 | 组件 | 技术 | 版本 | 用途 |
 |------|------|------|------|
-| 本地数据库 | PostgreSQL | 14+ | BettaFish 数据存储 |
-| 图数据库客户端 | nebula3-python | 3.0+ | 访问 NebulaGraph |
-| 数据处理 | Pandas | 1.5+ | 数据处理 |
-| 数据库连接 | psycopg2 | 2.9+ | PostgreSQL 连接 |
+| **本地数据库** | PostgreSQL | 14+ | BettaFish 数据存储 |
+| **图数据库客户端** | nebula3-python | 3.0+ | 访问 NebulaGraph |
+| **数据处理** | Pandas | 1.5+ | 数据处理 |
+| **数据库连接** | psycopg2 | 2.9+ | PostgreSQL 连接 |
+| **任务队列** | Celery | 5.3+ | 异步任务处理 |
+| **消息队列** | Redis | 7.0+ | 任务队列 + 结果缓存 |
+| **Redis客户端** | redis-py | 5.0+ | Redis 连接 |
 
 ### 6.3 Python 依赖
 
@@ -1146,11 +1729,19 @@ loguru==0.7.0
 requests==2.31.0
 beautifulsoup4==4.12.0
 
-# 新增依赖
+# 新增依赖 - 数据层
 psycopg2-binary==2.9.9
 nebula3-python==3.4.0
 pandas==2.1.0
 numpy==1.24.0
+
+# 新增依赖 - 异步任务 ⭐
+celery==5.3.4
+redis==5.0.1
+flower==2.0.1  # Celery 监控工具
+
+# 新增依赖 - 因子平台
+typing-extensions==4.8.0  # 类型注解支持
 ```
 
 ---
@@ -1292,24 +1883,36 @@ insight_db:
 ### 11.1 核心价值
 
 ```
-BettaFish 金融消息因子分析系统的核心价值：
+BettaFish 金融消息因子开发平台的核心价值：
 
-1. 多源消息整合
+1. 平台化能力 ⭐
+   - 因子标准化接口（BaseFactor）
+   - 因子注册机制（FactorRegistry）
+   - 快速开发新因子（1-2天上线）
+   - 因子版本管理与迭代
+
+2. 工程化能力 ⭐
+   - 异步任务处理（Celery + Redis）
+   - 高并发支持（10+任务并行）
+   - 进度实时跟踪（0-100%）
+   - 失败自动重试
+
+3. 多源消息整合
    - 国内外新闻（QueryEngine）
    - 多模态内容（MediaEngine）
    - 私有舆情数据（InsightEngine）
 
-2. 智能深度分析
+4. 智能深度分析
    - Agent 协作（ForumEngine）
    - LLM 深度分析
    - 结构化信息提取
 
-3. 标准化因子输出
+5. 标准化因子输出
    - 情感因子、事件因子、题材因子、舆情因子、时效因子
    - 数值化、可量化
    - 可直接用于量化策略
 
-4. 与现有系统协同
+6. 与现有系统协同
    - 复用基础数据（股票列表、题材列表）
    - 输出标准化因子（供量化系统使用）
    - 职责清晰，松耦合
@@ -1318,15 +1921,23 @@ BettaFish 金融消息因子分析系统的核心价值：
 ### 11.2 实施路径
 
 ```
-MVP 阶段（1-2个月）:
-├─ Week 1: 外部数据适配层
+MVP 阶段（8周）:
+├─ Week 1: 环境搭建 + 外部数据适配层
 ├─ Week 2: 消息获取层改造
 ├─ Week 3: 消息分析层改造
-├─ Week 4: 因子量化层实现 ⭐
-├─ Week 5: 完整流程集成
-├─ Week 6: 题材热度统计
-├─ Week 7: 性能优化与测试
-└─ Week 8: 文档与部署
+├─ Week 4: 因子量化层实现（传统方式）
+├─ Week 5: 异步架构实现 ⭐
+│   ├─ Celery + Redis 环境搭建
+│   ├─ 异步任务定义
+│   ├─ API 接口实现
+│   └─ 进度跟踪机制
+├─ Week 6: 因子平台实现 ⭐
+│   ├─ BaseFactor 基类
+│   ├─ FactorRegistry 注册中心
+│   ├─ FactorEngine 计算引擎
+│   └─ 6个内置因子
+├─ Week 7: 完整流程集成 + 题材热度统计
+└─ Week 8: 性能优化 + 测试 + 文档 + 部署
 
 优化阶段（2-4个月）:
 ├─ 数据同步层（1-2周）
@@ -1339,20 +1950,38 @@ MVP 阶段（1-2个月）:
 
 ### 11.3 成功标准
 
-**MVP 成功标准**:
-- ✅ 能够完成单只股票的消息分析
-- ✅ 生成标准化的消息因子
-- ✅ 因子数据可用于量化分析
-- ✅ 系统稳定运行
+**MVP 成功标准（核心）**:
+- ✅ **业务流程验证**：
+  - 能够完成单只股票的消息分析
+  - 生成标准化的消息因子
+  - 因子数据可用于量化分析
+  
+- ✅ **工程化能力验证**：
+  - 支持异步任务提交（API响应 < 100ms）
+  - 支持并发处理（10+任务同时运行）
+  - 支持批量分析（100+股票）
+  - 进度实时跟踪准确
+  
+- ✅ **平台化能力验证**：
+  - 新增因子只需3步（定义、注册、生效）
+  - 因子计算性能达标（< 1ms/因子）
+  - 因子独立可测试
 
 **长期成功标准**:
 - ✅ 消息召回率 > 90%
 - ✅ 分析准确率 > 90%
 - ✅ 因子有效性（通过回测验证）
 - ✅ 与量化系统无缝集成
+- ✅ 因子库持续扩展（20+因子）
 
 ---
 
-**文档版本**: v3.0 Final  
+**文档版本**: v4.0 Final  
 **最后更新**: 2025-12-02  
-**状态**: 待用户确认后开始编码实施
+**状态**: 已补充异步架构和因子平台设计，待用户确认后开始编码实施
+
+**核心特性**:
+- ✅ 因子开发平台化（可扩展）
+- ✅ 异步任务处理（高并发）
+- ✅ 标准化因子接口（易维护）
+- ✅ 完整的MVP实施路径（8周）
